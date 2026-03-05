@@ -1,0 +1,46 @@
+{
+  "name": "neo4j-memory",
+  "version": "0.1.0",
+  "description": "Graph-native long-term memory for OpenClaw using Neo4j",
+  "skills": ["skills/"],
+  "config": [
+    {
+      "key": "memory.neo4j.uri",
+      "required": true,
+      "description": "Neo4j connection URI (e.g. bolt://localhost:7687 or neo4j+s://xxx.databases.neo4j.io)"
+    },
+    {
+      "key": "memory.neo4j.user",
+      "required": true,
+      "description": "Neo4j username"
+    },
+    {
+      "key": "memory.neo4j.password",
+      "required": true,
+      "description": "Neo4j password",
+      "secret": true
+    },
+    {
+      "key": "memory.neo4j.port",
+      "required": false,
+      "default": "7474",
+      "description": "Bridge server port"
+    },
+    {
+      "key": "memory.neo4j.agent_id",
+      "required": false,
+      "default": "default",
+      "description": "Agent identity for memory namespace scoping"
+    },
+    {
+      "key": "memory.neo4j.observational",
+      "required": false,
+      "default": "false",
+      "description": "Enable observational memory (Phase 2 feature)"
+    }
+  ],
+  "lifecycle": {
+    "start": "server/start.sh",
+    "stop": "server/stop.sh"
+  }
+}
