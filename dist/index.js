@@ -1,120 +1,58 @@
 "use strict";
-
-const path = require("node:path");
-const { spawn } = require("node:child_process");
-
-const PLUGIN_ID = "openclaw-neo4j-memory";
-const SERVICE_ID = "openclaw-neo4j-memory-bridge";
-const DEFAULTS = {
-  bridgePort: 7575,
-  agentId: "default",
-  instance: "openclaw-memory",
-};
-
-function readPluginConfig(api) {
-  const entries = api?.config?.plugins?.entries ?? {};
-  const candidates = [
-    PLUGIN_ID,
-    "neo4j-memory",
-    "@johnymontana/openclaw-neo4j-memory",
-  ];
-
-  for (const candidate of candidates) {
-    const config = entries?.[candidate]?.config;
-    if (config && typeof config === "object") {
-      return config;
-    }
-  }
-
-  return {};
-}
-
-function buildScriptEnv(api) {
-  const config = readPluginConfig(api);
-  return {
-    AGENT_ID: String(config.agentId ?? DEFAULTS.agentId),
-    BRIDGE_PORT: String(config.bridgePort ?? DEFAULTS.bridgePort),
-    NEO4J_INSTANCE: String(config.instance ?? DEFAULTS.instance),
-  };
-}
-
-function pipeLines(stream, onLine) {
-  let buffer = "";
-
-  stream.on("data", (chunk) => {
-    buffer += String(chunk);
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() ?? "";
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed) {
-        onLine(trimmed);
-      }
-    }
-  });
-
-  stream.on("end", () => {
-    const trimmed = buffer.trim();
-    if (trimmed) {
-      onLine(trimmed);
-    }
-  });
-}
-
-function runLifecycleScript(api, scriptName) {
-  const pluginRoot = path.join(__dirname, "..");
-  const scriptPath = path.join(pluginRoot, "server", scriptName);
-  const child = spawn(scriptPath, [], {
-    cwd: pluginRoot,
-    env: {
-      ...process.env,
-      ...buildScriptEnv(api),
-    },
-  });
-
-  pipeLines(child.stdout, (line) => api.logger.info(`[${PLUGIN_ID}] ${line}`));
-  pipeLines(child.stderr, (line) => api.logger.warn(`[${PLUGIN_ID}] ${line}`));
-
-  return new Promise((resolve, reject) => {
-    child.once("error", (error) => {
-      reject(
-        new Error(`Failed to launch ${scriptName}: ${error.message || String(error)}`),
-      );
-    });
-
-    child.once("close", (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-
-      reject(new Error(`${scriptName} exited with status ${code ?? "unknown"}`));
-    });
-  });
-}
-
+const neo4j_local_1 = require("@johnymontana/neo4j-local");
+const config_1 = require("./config");
+const bridge_1 = require("./bridge");
+let neo4jInstance = null;
+let bridgeServer = null;
 const plugin = {
-  id: PLUGIN_ID,
-  name: "Neo4j Memory",
-  register(api) {
-    api.registerService({
-      id: SERVICE_ID,
-      start: async () => {
-        await runLifecycleScript(api, "start.sh");
-      },
-      stop: async () => {
-        try {
-          await runLifecycleScript(api, "stop.sh");
-        } catch (error) {
-          api.logger.warn(
-            `[${PLUGIN_ID}] Failed to stop bridge cleanly: ${error.message || String(error)}`,
-          );
-        }
-      },
-    });
-  },
+    id: config_1.PLUGIN_ID,
+    name: "Neo4j Memory",
+    register(api) {
+        api.registerService({
+            id: config_1.SERVICE_ID,
+            start: async () => {
+                const config = (0, config_1.getResolvedConfig)(api);
+                api.logger.info(`[${config_1.PLUGIN_ID}] Starting Neo4j instance (${config.instance})...`);
+                neo4jInstance = new neo4j_local_1.Neo4jLocal({
+                    instanceName: config.instance,
+                });
+                const credentials = await neo4jInstance.start();
+                api.logger.info(`[${config_1.PLUGIN_ID}] Neo4j running at ${credentials.uri}`);
+                bridgeServer = new bridge_1.BridgeServer({
+                    bridgePort: config.bridgePort,
+                    agentId: config.agentId,
+                    neo4jUri: credentials.uri,
+                    neo4jUser: credentials.username,
+                    neo4jPassword: credentials.password,
+                    logger: api.logger,
+                });
+                await bridgeServer.start();
+                api.logger.info(`[${config_1.PLUGIN_ID}] Bridge server healthy on port ${config.bridgePort}`);
+            },
+            stop: async () => {
+                try {
+                    if (bridgeServer) {
+                        api.logger.info(`[${config_1.PLUGIN_ID}] Stopping bridge server...`);
+                        await bridgeServer.stop();
+                        bridgeServer = null;
+                    }
+                }
+                catch (error) {
+                    api.logger.warn(`[${config_1.PLUGIN_ID}] Failed to stop bridge cleanly: ${error instanceof Error ? error.message : String(error)}`);
+                }
+                try {
+                    if (neo4jInstance) {
+                        api.logger.info(`[${config_1.PLUGIN_ID}] Stopping Neo4j...`);
+                        await neo4jInstance.stop();
+                        neo4jInstance = null;
+                    }
+                }
+                catch (error) {
+                    api.logger.warn(`[${config_1.PLUGIN_ID}] Failed to stop Neo4j cleanly: ${error instanceof Error ? error.message : String(error)}`);
+                }
+            },
+        });
+    },
 };
-
 module.exports = plugin;
-module.exports.default = plugin;
+//# sourceMappingURL=index.js.map
