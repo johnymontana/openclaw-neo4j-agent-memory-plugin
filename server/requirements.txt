@@ -1,4 +1,4 @@
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
-neo4j>=5.14.0
+neo4j-agent-memory>=0.0.4
 pydantic>=2.5.0
