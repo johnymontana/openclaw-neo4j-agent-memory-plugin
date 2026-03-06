@@ -72,7 +72,18 @@ export class BridgeServer {
       );
     });
 
-    await this.waitForHealth(15);
+    // Race health check against early process exit
+    const earlyExit = new Promise<never>((_resolve, reject) => {
+      this.process!.once("close", (code) => {
+        reject(
+          new Error(
+            `Bridge server process exited unexpectedly with code ${code ?? "unknown"}`
+          )
+        );
+      });
+    });
+
+    await Promise.race([this.waitForHealth(15), earlyExit]);
     this.options.logger.info(
       `[openclaw-neo4j-memory] Bridge server started (PID ${this.process.pid})`
     );
@@ -183,28 +194,47 @@ export class BridgeServer {
   waitForHealth(maxWaitSeconds: number): Promise<void> {
     const url = `http://localhost:${this.options.bridgePort}/memory/health`;
     return new Promise((resolve, reject) => {
+      let settled = false;
       let elapsed = 0;
-      const interval = setInterval(() => {
+      let interval: ReturnType<typeof setInterval> | null = null;
+
+      const check = () => {
+        if (settled) return;
+
         http
           .get(url, (res) => {
-            if (res.statusCode === 200) {
-              clearInterval(interval);
+            res.resume(); // drain response body to free the socket
+            if (!settled && res.statusCode === 200) {
+              settled = true;
+              if (interval) clearInterval(interval);
               resolve();
             }
           })
           .on("error", () => {
             // server not ready yet
           });
+      };
 
+      // Check immediately, then every second
+      check();
+
+      if (settled) return; // resolved synchronously on first check
+
+      interval = setInterval(() => {
         elapsed++;
         if (elapsed >= maxWaitSeconds) {
-          clearInterval(interval);
-          reject(
-            new Error(
-              `Bridge server did not become healthy within ${maxWaitSeconds}s`
-            )
-          );
+          if (!settled) {
+            settled = true;
+            clearInterval(interval!);
+            reject(
+              new Error(
+                `Bridge server did not become healthy within ${maxWaitSeconds}s`
+              )
+            );
+          }
+          return;
         }
+        check();
       }, 1000);
     });
   }

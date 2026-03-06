@@ -10,6 +10,21 @@ vi.mock("node:http", () => ({
   }),
 }));
 
+// Event listener store for the mock child process
+const processEventHandlers: Record<string, Array<(...args: unknown[]) => void>> = {};
+
+function clearProcessEventHandlers() {
+  for (const key of Object.keys(processEventHandlers)) {
+    delete processEventHandlers[key];
+  }
+}
+
+function emitProcessEvent(event: string, ...args: unknown[]) {
+  for (const handler of processEventHandlers[event] ?? []) {
+    handler(...args);
+  }
+}
+
 // Mock child_process
 vi.mock("node:child_process", () => {
   const mockProcess = {
@@ -20,7 +35,14 @@ vi.mock("node:child_process", () => {
     stderr: {
       on: vi.fn(),
     },
-    on: vi.fn(),
+    on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+      if (!processEventHandlers[event]) processEventHandlers[event] = [];
+      processEventHandlers[event].push(handler);
+    }),
+    once: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+      if (!processEventHandlers[event]) processEventHandlers[event] = [];
+      processEventHandlers[event].push(handler);
+    }),
     unref: vi.fn(),
   };
 
@@ -60,6 +82,7 @@ function makeOptions(overrides?: Partial<BridgeOptions>): BridgeOptions {
 describe("BridgeServer", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    clearProcessEventHandlers();
   });
 
   it("can be constructed with options", () => {
@@ -101,12 +124,58 @@ describe("BridgeServer", () => {
       const bridge = new BridgeServer(makeOptions());
 
       mockHttpGetHandler = (_url: unknown, callback: unknown) => {
-        const cb = callback as (res: { statusCode: number }) => void;
-        cb({ statusCode: 200 });
+        const cb = callback as (res: { statusCode: number; resume: () => void }) => void;
+        cb({ statusCode: 200, resume: vi.fn() });
         return { on: vi.fn() };
       };
 
       await bridge.waitForHealth(5);
+    });
+
+    it("calls res.resume() to drain the response body", async () => {
+      const bridge = new BridgeServer(makeOptions());
+      const resumeSpy = vi.fn();
+
+      mockHttpGetHandler = (_url: unknown, callback: unknown) => {
+        const cb = callback as (res: { statusCode: number; resume: () => void }) => void;
+        cb({ statusCode: 200, resume: resumeSpy });
+        return { on: vi.fn() };
+      };
+
+      await bridge.waitForHealth(5);
+      expect(resumeSpy).toHaveBeenCalled();
+    });
+
+    it("checks health immediately on first call", async () => {
+      const bridge = new BridgeServer(makeOptions());
+      let callCount = 0;
+
+      mockHttpGetHandler = (_url: unknown, callback: unknown) => {
+        callCount++;
+        const cb = callback as (res: { statusCode: number; resume: () => void }) => void;
+        cb({ statusCode: 200, resume: vi.fn() });
+        return { on: vi.fn() };
+      };
+
+      await bridge.waitForHealth(5);
+      // Should have been called at least once immediately (not waiting 1s)
+      expect(callCount).toBe(1);
+    });
+
+    it("resolves on 200 after initial 503 responses", async () => {
+      const bridge = new BridgeServer(makeOptions());
+      let callCount = 0;
+
+      mockHttpGetHandler = (_url: unknown, callback: unknown) => {
+        callCount++;
+        const cb = callback as (res: { statusCode: number; resume: () => void }) => void;
+        // Return 503 on first two calls, then 200
+        cb({ statusCode: callCount >= 3 ? 200 : 503, resume: vi.fn() });
+        return { on: vi.fn() };
+      };
+
+      await bridge.waitForHealth(5);
+      expect(callCount).toBeGreaterThanOrEqual(3);
     });
 
     it("rejects after timeout when server never responds", async () => {
@@ -124,6 +193,54 @@ describe("BridgeServer", () => {
 
       await expect(bridge.waitForHealth(1)).rejects.toThrow(
         "did not become healthy"
+      );
+    });
+
+    it("does not resolve after timeout even if late response arrives", async () => {
+      const bridge = new BridgeServer(makeOptions());
+      let savedCallback: ((res: { statusCode: number; resume: () => void }) => void) | null = null;
+
+      mockHttpGetHandler = (_url: unknown, callback: unknown) => {
+        // Capture callback but don't invoke it — simulates slow server
+        savedCallback = callback as typeof savedCallback;
+        return { on: vi.fn() };
+      };
+
+      const result = bridge.waitForHealth(1);
+
+      await expect(result).rejects.toThrow("did not become healthy");
+
+      // Now the late response arrives — should NOT cause issues
+      if (savedCallback) {
+        savedCallback({ statusCode: 200, resume: vi.fn() });
+      }
+    });
+  });
+
+  describe("early process exit", () => {
+    it("rejects immediately when bridge process exits during health check", async () => {
+      const bridge = new BridgeServer(makeOptions());
+
+      // Health check never succeeds — server never responds
+      mockHttpGetHandler = (_url: unknown, _callback: unknown) => {
+        const req = {
+          on: (_event: string, handler: (err: Error) => void) => {
+            handler(new Error("ECONNREFUSED"));
+            return req;
+          },
+        };
+        return req;
+      };
+
+      const startPromise = bridge.start();
+
+      // Simulate the child process crashing shortly after spawn
+      setTimeout(() => {
+        emitProcessEvent("close", 1);
+      }, 50);
+
+      await expect(startPromise).rejects.toThrow(
+        "exited unexpectedly with code 1"
       );
     });
   });

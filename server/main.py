@@ -9,6 +9,7 @@ and reasoning (tool call traces and decision provenance).
 import os
 import time
 import uuid
+import asyncio
 import logging
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
@@ -38,55 +39,89 @@ logger = logging.getLogger("neo4j-memory-bridge")
 driver = None
 
 
+async def _connect_and_init(max_retries: int = 5, delay: float = 2.0):
+    """Connect to Neo4j and create indexes, retrying if Neo4j isn't ready yet."""
+    global driver
+    last_error = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            driver = AsyncGraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+            # Verify connectivity and create indexes
+            async with driver.session() as session:
+                await session.run(
+                    "CREATE INDEX IF NOT EXISTS FOR (p:Person) ON (p.name)"
+                )
+                await session.run(
+                    "CREATE INDEX IF NOT EXISTS FOR (o:Object) ON (o.name)"
+                )
+                await session.run(
+                    "CREATE INDEX IF NOT EXISTS FOR (l:Location) ON (l.name)"
+                )
+                await session.run(
+                    "CREATE INDEX IF NOT EXISTS FOR (e:Event) ON (e.name)"
+                )
+                await session.run(
+                    "CREATE INDEX IF NOT EXISTS FOR (ob:Observation) ON (ob.content)"
+                )
+                await session.run(
+                    "CREATE INDEX IF NOT EXISTS FOR (s:Session) ON (s.session_id)"
+                )
+                await session.run(
+                    "CREATE INDEX IF NOT EXISTS FOR (m:Message) ON (m.timestamp)"
+                )
+                await session.run(
+                    "CREATE INDEX IF NOT EXISTS FOR (tc:ToolCall) ON (tc.call_id)"
+                )
+                await session.run(
+                    "CREATE INDEX IF NOT EXISTS FOR (a:Agent) ON (a.agent_id)"
+                )
+                await session.run(
+                    "CREATE INDEX IF NOT EXISTS FOR (c:Channel) ON (c.name)"
+                )
+                # Full-text index for recall search
+                await session.run(
+                    """
+                    CREATE FULLTEXT INDEX entityFulltext IF NOT EXISTS
+                    FOR (n:Person|Object|Location|Event|Observation)
+                    ON EACH [n.name, n.content, n.description]
+                    """
+                )
+            logger.info("Connected to Neo4j at %s", NEO4J_URI)
+            logger.info("Indexes and constraints initialized")
+            return
+        except Exception as e:
+            last_error = e
+            if driver:
+                try:
+                    await driver.close()
+                except Exception:
+                    pass
+                driver = None
+            if attempt < max_retries:
+                logger.warning(
+                    "Neo4j not ready (attempt %d/%d): %s — retrying in %.0fs",
+                    attempt, max_retries, e, delay,
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.error(
+                    "Failed to connect to Neo4j after %d attempts: %s",
+                    max_retries, e,
+                )
+
+    raise RuntimeError(
+        f"Could not connect to Neo4j at {NEO4J_URI} after {max_retries} attempts: {last_error}"
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global driver
-    driver = AsyncGraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
-    logger.info("Connected to Neo4j at %s", NEO4J_URI)
-    # Ensure indexes/constraints exist
-    async with driver.session() as session:
-        await session.run(
-            "CREATE INDEX IF NOT EXISTS FOR (p:Person) ON (p.name)"
-        )
-        await session.run(
-            "CREATE INDEX IF NOT EXISTS FOR (o:Object) ON (o.name)"
-        )
-        await session.run(
-            "CREATE INDEX IF NOT EXISTS FOR (l:Location) ON (l.name)"
-        )
-        await session.run(
-            "CREATE INDEX IF NOT EXISTS FOR (e:Event) ON (e.name)"
-        )
-        await session.run(
-            "CREATE INDEX IF NOT EXISTS FOR (ob:Observation) ON (ob.content)"
-        )
-        await session.run(
-            "CREATE INDEX IF NOT EXISTS FOR (s:Session) ON (s.session_id)"
-        )
-        await session.run(
-            "CREATE INDEX IF NOT EXISTS FOR (m:Message) ON (m.timestamp)"
-        )
-        await session.run(
-            "CREATE INDEX IF NOT EXISTS FOR (tc:ToolCall) ON (tc.call_id)"
-        )
-        await session.run(
-            "CREATE INDEX IF NOT EXISTS FOR (a:Agent) ON (a.agent_id)"
-        )
-        await session.run(
-            "CREATE INDEX IF NOT EXISTS FOR (c:Channel) ON (c.name)"
-        )
-        # Full-text index for recall search
-        await session.run(
-            """
-            CREATE FULLTEXT INDEX entityFulltext IF NOT EXISTS
-            FOR (n:Person|Object|Location|Event|Observation)
-            ON EACH [n.name, n.content, n.description]
-            """
-        )
-    logger.info("Indexes and constraints initialized")
+    await _connect_and_init()
     yield
-    await driver.close()
-    logger.info("Neo4j driver closed")
+    if driver:
+        await driver.close()
+        logger.info("Neo4j driver closed")
 
 
 app = FastAPI(
