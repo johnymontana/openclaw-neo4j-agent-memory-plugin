@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 VENV_DIR="$SCRIPT_DIR/.venv"
 PID_FILE="$SCRIPT_DIR/pid.txt"
 LOG_FILE="$SCRIPT_DIR/server.log"
@@ -65,6 +66,46 @@ if [ -f "$PID_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Check for Node.js (required for neo4j-local)
+# ---------------------------------------------------------------------------
+
+command -v node &>/dev/null || die \
+    "Node.js >= 18 is required but not found in PATH." \
+    "Install it from https://nodejs.org/"
+
+# ---------------------------------------------------------------------------
+# Install npm dependencies (neo4j-local)
+# ---------------------------------------------------------------------------
+
+if [ ! -d "$PLUGIN_DIR/node_modules/@johnymontana/neo4j-local" ]; then
+    log "Installing npm dependencies ..."
+    (cd "$PLUGIN_DIR" && npm install --quiet 2>&1) || die "Failed to install npm dependencies"
+fi
+
+# ---------------------------------------------------------------------------
+# Start Neo4j locally via neo4j-local
+# ---------------------------------------------------------------------------
+
+NEO4J_INSTANCE="${NEO4J_INSTANCE:-openclaw-memory}"
+
+log "Starting local Neo4j instance ($NEO4J_INSTANCE) ..."
+npx --prefix "$PLUGIN_DIR" @johnymontana/neo4j-local start --instance "$NEO4J_INSTANCE" 2>&1 || die "Failed to start Neo4j"
+
+# Retrieve credentials from neo4j-local
+NEO4J_CREDS_JSON="$(npx --prefix "$PLUGIN_DIR" @johnymontana/neo4j-local credentials --instance "$NEO4J_INSTANCE" --json 2>/dev/null)" \
+    || die "Failed to get Neo4j credentials"
+
+NEO4J_URI="$(echo "$NEO4J_CREDS_JSON" | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8'); const c=JSON.parse(d); console.log(c.uri || c.boltUri || 'bolt://localhost:7687')")"
+NEO4J_USER="$(echo "$NEO4J_CREDS_JSON" | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8'); const c=JSON.parse(d); console.log(c.username || c.user || 'neo4j')")"
+NEO4J_PASSWORD="$(echo "$NEO4J_CREDS_JSON" | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8'); const c=JSON.parse(d); console.log(c.password)")"
+
+export NEO4J_URI
+export NEO4J_USER
+export NEO4J_PASSWORD
+
+log "Neo4j running at $NEO4J_URI (user: $NEO4J_USER)"
+
+# ---------------------------------------------------------------------------
 # Locate a compatible Python
 # ---------------------------------------------------------------------------
 
@@ -103,11 +144,8 @@ fi
 # Environment defaults
 # ---------------------------------------------------------------------------
 
-export NEO4J_URI="${NEO4J_URI:-bolt://localhost:7687}"
-export NEO4J_USER="${NEO4J_USER:-neo4j}"
-export NEO4J_PASSWORD="${NEO4J_PASSWORD:-password}"
 export AGENT_ID="${AGENT_ID:-default}"
-export BRIDGE_PORT="${BRIDGE_PORT:-7474}"
+export BRIDGE_PORT="${BRIDGE_PORT:-7575}"
 
 # ---------------------------------------------------------------------------
 # Check port availability
@@ -133,12 +171,12 @@ echo "$SERVER_PID" > "$PID_FILE"
 # Health check
 # ---------------------------------------------------------------------------
 
-if wait_for_health 10; then
+if wait_for_health 15; then
     log "Bridge server started (PID $SERVER_PID)"
     log "Health: http://localhost:$BRIDGE_PORT/memory/health"
     log "Logs:   $LOG_FILE"
 else
-    err "Server failed to become healthy within 10 seconds."
+    err "Server failed to become healthy within 15 seconds."
     if kill -0 "$SERVER_PID" 2>/dev/null; then
         err "Process is running but not responding — check Neo4j connectivity."
     else

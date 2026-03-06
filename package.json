@@ -1,0 +1,9 @@
+{
+  "name": "openclaw-neo4j-agent-memory-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Graph-native long-term memory for OpenClaw using Neo4j",
+  "dependencies": {
+    "@johnymontana/neo4j-local": "latest"
+  }
+}

@@ -26,7 +26,7 @@ NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.environ.get("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "password")
 AGENT_ID = os.environ.get("AGENT_ID", "default")
-BRIDGE_PORT = int(os.environ.get("BRIDGE_PORT", "7474"))
+BRIDGE_PORT = int(os.environ.get("BRIDGE_PORT", "7575"))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("neo4j-memory-bridge")
