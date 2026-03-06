@@ -1,7 +1,7 @@
 {
   "id": "openclaw-neo4j-memory",
   "name": "Neo4j Memory",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Graph-native long-term memory for OpenClaw using Neo4j (auto-managed local instance)",
   "kind": "memory",
   "skills": ["skills/"],
