@@ -30,13 +30,15 @@ This plugin gives your agent a queryable knowledge graph that answers "how does 
 ### 1. Install the Plugin
 
 ```bash
-openclaw plugin install @johnymontana/openclaw-neo4j-memory
+openclaw plugins install @johnymontana/openclaw-neo4j-memory
 ```
 
 This will automatically:
 - Download and start a local Neo4j instance (via [`@johnymontana/neo4j-local`](https://www.npmjs.com/package/@johnymontana/neo4j-local))
 - Launch the FastAPI bridge server
 - Configure credentials automatically — no manual Neo4j setup required
+
+OpenClaw may warn that the plugin contains shell-command execution. That is expected for this plugin: the runtime entry starts and stops the existing `server/start.sh` and `server/stop.sh` lifecycle scripts.
 
 ### 2. Use the Skills
 
@@ -221,14 +223,32 @@ The migration tool parses bullet points, headers, and key-value patterns, classi
 
 ## Configuration (Optional)
 
-The plugin works out of the box with zero configuration. Optionally customize via OpenClaw plugin config:
+The plugin works out of the box with zero configuration. To override defaults, configure the plugin under `plugins.entries.openclaw-neo4j-memory.config`:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "openclaw-neo4j-memory": {
+        "enabled": true,
+        "config": {
+          "bridgePort": 7575,
+          "agentId": "default",
+          "instance": "openclaw-memory",
+          "observational": false
+        }
+      }
+    }
+  }
+}
+```
 
 | Key | Default | Description |
 |---|---|---|
-| `memory.neo4j.port` | `7575` | Bridge server port |
-| `memory.neo4j.agent_id` | `default` | Agent identity for memory namespace scoping |
-| `memory.neo4j.instance` | `openclaw-memory` | Neo4j local instance name |
-| `memory.neo4j.observational` | `false` | Enable observational memory (Phase 2) |
+| `bridgePort` | `7575` | Bridge server port |
+| `agentId` | `default` | Agent identity for memory namespace scoping |
+| `instance` | `openclaw-memory` | Neo4j local instance name |
+| `observational` | `false` | Enable observational memory (Phase 2) |
 
 ## Stopping
 

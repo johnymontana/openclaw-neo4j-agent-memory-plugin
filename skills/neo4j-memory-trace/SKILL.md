@@ -8,7 +8,6 @@ metadata:
   openclaw:
     emoji: "🔗"
     requires:
-      config: ["memory.neo4j.uri", "memory.neo4j.password"]
       bins: ["curl"]
 ---
 
@@ -27,7 +26,7 @@ metadata:
 Record when you call external tools (web search, file read, API calls, etc.):
 
 ```bash
-curl -s -X POST http://localhost:7474/memory/trace \
+curl -s -X POST http://localhost:7575/memory/trace \
   -H "Content-Type: application/json" \
   -d '{
     "type": "tool_call",
@@ -49,7 +48,7 @@ curl -s -X POST http://localhost:7474/memory/trace \
 Record intermediate reasoning — conclusions, inferences, and the evidence behind them:
 
 ```bash
-curl -s -X POST http://localhost:7474/memory/trace \
+curl -s -X POST http://localhost:7575/memory/trace \
   -H "Content-Type: application/json" \
   -d '{
     "type": "reasoning_step",
@@ -74,7 +73,7 @@ Step types:
 Record when a skill is invoked:
 
 ```bash
-curl -s -X POST http://localhost:7474/memory/trace \
+curl -s -X POST http://localhost:7575/memory/trace \
   -H "Content-Type: application/json" \
   -d '{
     "type": "skill_invocation",
@@ -92,7 +91,7 @@ curl -s -X POST http://localhost:7474/memory/trace \
 ### Via recall (include reasoning)
 
 ```bash
-curl -s -X POST http://localhost:7474/memory/recall \
+curl -s -X POST http://localhost:7575/memory/recall \
   -H "Content-Type: application/json" \
   -d '{
     "query": "Acme Corp earnings",

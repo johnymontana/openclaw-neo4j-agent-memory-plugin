@@ -8,7 +8,6 @@ metadata:
   openclaw:
     emoji: "💾"
     requires:
-      config: ["memory.neo4j.uri", "memory.neo4j.password"]
       bins: ["curl"]
 ---
 
@@ -52,7 +51,7 @@ Store conversation messages for short-term memory within a session.
 4. POST to the bridge server:
 
 ```bash
-curl -s -X POST http://localhost:7474/memory/store \
+curl -s -X POST http://localhost:7575/memory/store \
   -H "Content-Type: application/json" \
   -d '{
     "type": "entity",
@@ -79,7 +78,7 @@ curl -s -X POST http://localhost:7474/memory/store \
 ### Storing an observation
 
 ```bash
-curl -s -X POST http://localhost:7474/memory/store \
+curl -s -X POST http://localhost:7575/memory/store \
   -H "Content-Type: application/json" \
   -d '{
     "type": "observation",
@@ -94,7 +93,7 @@ curl -s -X POST http://localhost:7474/memory/store \
 ### Storing a message
 
 ```bash
-curl -s -X POST http://localhost:7474/memory/store \
+curl -s -X POST http://localhost:7575/memory/store \
   -H "Content-Type: application/json" \
   -d '{
     "type": "message",

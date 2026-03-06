@@ -8,7 +8,6 @@ metadata:
   openclaw:
     emoji: "🔍"
     requires:
-      config: ["memory.neo4j.uri", "memory.neo4j.password"]
       bins: ["curl"]
 ---
 
@@ -30,7 +29,7 @@ metadata:
 Search by entity type and/or name:
 
 ```bash
-curl -s -X POST http://localhost:7474/memory/query \
+curl -s -X POST http://localhost:7575/memory/query \
   -H "Content-Type: application/json" \
   -d '{
     "entity_type": "Person",
@@ -49,7 +48,7 @@ Parameters:
 For advanced queries — relationship traversals, aggregations, path finding:
 
 ```bash
-curl -s -X POST http://localhost:7474/memory/query \
+curl -s -X POST http://localhost:7575/memory/query \
   -H "Content-Type: application/json" \
   -d '{
     "cypher": "MATCH (p:Person)-[:WORKS_AT]->(o:Organization {name: $company}) RETURN p.name AS name, p.role AS role",
@@ -103,7 +102,7 @@ ORDER BY e.date DESC LIMIT 20
 ### Check memory stats
 
 ```bash
-curl -s http://localhost:7474/memory/stats
+curl -s http://localhost:7575/memory/stats
 ```
 
 Returns:

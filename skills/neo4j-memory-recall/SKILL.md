@@ -8,7 +8,6 @@ metadata:
   openclaw:
     emoji: "🧠"
     requires:
-      config: ["memory.neo4j.uri", "memory.neo4j.password"]
       bins: ["curl"]
 ---
 
@@ -33,7 +32,7 @@ metadata:
 4. If nothing is found, proceed normally and note you have no prior context
 
 ```bash
-curl -s -X POST http://localhost:7474/memory/recall \
+curl -s -X POST http://localhost:7575/memory/recall \
   -H "Content-Type: application/json" \
   -d '{
     "query": "Sarah Kim",
@@ -46,7 +45,7 @@ curl -s -X POST http://localhost:7474/memory/recall \
 Include reasoning history (tool calls, decisions) for audit or debugging:
 
 ```bash
-curl -s -X POST http://localhost:7474/memory/recall \
+curl -s -X POST http://localhost:7575/memory/recall \
   -H "Content-Type: application/json" \
   -d '{
     "query": "Q3 roadmap decision",
@@ -60,7 +59,7 @@ curl -s -X POST http://localhost:7474/memory/recall \
 For the most token-efficient context injection, use the `/memory/context` endpoint which returns a pre-formatted, relevance-ranked context block:
 
 ```bash
-curl -s -X POST http://localhost:7474/memory/context \
+curl -s -X POST http://localhost:7575/memory/context \
   -H "Content-Type: application/json" \
   -d '{
     "message": "The full user message to find context for",
