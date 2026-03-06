@@ -1,6 +1,6 @@
 {
   "name": "@johnymontana/openclaw-neo4j-memory",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Graph-native long-term memory for OpenClaw using Neo4j",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
