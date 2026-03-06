@@ -23,53 +23,22 @@ This plugin gives your agent a queryable knowledge graph that answers "how does 
 
 ### Prerequisites
 
-- A running Neo4j instance ([Neo4j Desktop](https://neo4j.com/download/), [Docker](https://hub.docker.com/_/neo4j), or [AuraDB Free](https://neo4j.com/cloud/aura-free/))
+- Node.js >= 18
 - Python 3.10+
 - OpenClaw agent configured
 
 ### 1. Install the Plugin
 
-Copy or clone this directory into your OpenClaw plugins folder:
-
 ```bash
-git clone https://github.com/johnymontana/openclaw-neo4j-agent-memory-plugin.git
+openclaw plugin install @johnymontana/openclaw-neo4j-memory
 ```
 
-### 2. Configure Neo4j Connection
+This will automatically:
+- Download and start a local Neo4j instance (via [`@johnymontana/neo4j-local`](https://www.npmjs.com/package/@johnymontana/neo4j-local))
+- Launch the FastAPI bridge server
+- Configure credentials automatically — no manual Neo4j setup required
 
-Set environment variables:
-
-```bash
-export NEO4J_URI="bolt://localhost:7687"
-export NEO4J_USER="neo4j"
-export NEO4J_PASSWORD="your-password"
-export BRIDGE_PORT="7474"        # optional, default 7474
-export AGENT_ID="my-agent"       # optional, default "default"
-```
-
-Or configure via OpenClaw's plugin config:
-
-```json
-{
-  "memory.neo4j.uri": "bolt://localhost:7687",
-  "memory.neo4j.user": "neo4j",
-  "memory.neo4j.password": "your-password"
-}
-```
-
-### 3. Start the Bridge Server
-
-```bash
-./server/start.sh
-```
-
-Verify it's running:
-
-```bash
-curl http://localhost:7474/memory/health
-```
-
-### 4. Use the Skills
+### 2. Use the Skills
 
 The plugin ships four skills your agent learns automatically:
 
@@ -99,7 +68,7 @@ The plugin ships four skills your agent learns automatically:
               │  FastAPI      │
               │  Bridge       │
               │  Server       │
-              │  :7474        │
+              │  :7575        │
               └───────┬───────┘
                       │
               ┌───────▼───────┐
@@ -161,7 +130,7 @@ The plugin ships four skills your agent learns automatically:
 Store an entity, message, or observation.
 
 ```bash
-curl -X POST http://localhost:7474/memory/store \
+curl -X POST http://localhost:7575/memory/store \
   -H "Content-Type: application/json" \
   -d '{
     "type": "entity",
@@ -182,7 +151,7 @@ curl -X POST http://localhost:7474/memory/store \
 Retrieve relevant context via full-text search + graph traversal.
 
 ```bash
-curl -X POST http://localhost:7474/memory/recall \
+curl -X POST http://localhost:7575/memory/recall \
   -H "Content-Type: application/json" \
   -d '{"query": "Sarah Kim", "limit": 10}'
 ```
@@ -192,7 +161,7 @@ curl -X POST http://localhost:7474/memory/recall \
 Run structured or free-form Cypher queries.
 
 ```bash
-curl -X POST http://localhost:7474/memory/query \
+curl -X POST http://localhost:7575/memory/query \
   -H "Content-Type: application/json" \
   -d '{
     "cypher": "MATCH (p:Person)-[:WORKS_AT]->(o:Organization) RETURN p.name, o.name LIMIT 10"
@@ -204,7 +173,7 @@ curl -X POST http://localhost:7474/memory/query \
 Record tool calls, reasoning steps, or skill invocations.
 
 ```bash
-curl -X POST http://localhost:7474/memory/trace \
+curl -X POST http://localhost:7575/memory/trace \
   -H "Content-Type: application/json" \
   -d '{
     "type": "tool_call",
@@ -223,7 +192,7 @@ curl -X POST http://localhost:7474/memory/trace \
 Selective context injection — returns a relevance-ranked context block.
 
 ```bash
-curl -X POST http://localhost:7474/memory/context \
+curl -X POST http://localhost:7575/memory/context \
   -H "Content-Type: application/json" \
   -d '{"message": "What do we know about Sarah?", "max_tokens": 2000}'
 ```
@@ -250,48 +219,30 @@ python tools/migrate_memory.py --memory-file /path/to/MEMORY.md
 
 The migration tool parses bullet points, headers, and key-value patterns, classifying them as entities or observations and creating appropriate graph nodes.
 
-## Docker Compose (Optional)
+## Configuration (Optional)
 
-For a self-contained setup with Neo4j included:
+The plugin works out of the box with zero configuration. Optionally customize via OpenClaw plugin config:
 
-```yaml
-# docker-compose.yml
-services:
-  neo4j:
-    image: neo4j:5
-    ports:
-      - "7687:7687"
-      - "7475:7474"
-    environment:
-      - NEO4J_AUTH=neo4j/openclaw-memory
-    volumes:
-      - neo4j_data:/data
+| Key | Default | Description |
+|---|---|---|
+| `memory.neo4j.port` | `7575` | Bridge server port |
+| `memory.neo4j.agent_id` | `default` | Agent identity for memory namespace scoping |
+| `memory.neo4j.instance` | `openclaw-memory` | Neo4j local instance name |
+| `memory.neo4j.observational` | `false` | Enable observational memory (Phase 2) |
 
-  bridge:
-    build: ./server
-    ports:
-      - "7474:7474"
-    environment:
-      - NEO4J_URI=bolt://neo4j:7687
-      - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=openclaw-memory
-    depends_on:
-      - neo4j
-
-volumes:
-  neo4j_data:
-```
-
-## Stopping the Server
+## Stopping
 
 ```bash
 ./server/stop.sh
 ```
 
+This stops both the bridge server and the local Neo4j instance.
+
 ## Project Structure
 
 ```
 openclaw-neo4j-memory/
+├── package.json                  # npm package & neo4j-local dependency
 ├── openclaw.plugin.json          # Plugin manifest
 ├── skills/
 │   ├── neo4j-memory-store/
@@ -305,16 +256,12 @@ openclaw-neo4j-memory/
 ├── server/
 │   ├── main.py                  # FastAPI bridge server
 │   ├── requirements.txt         # Python dependencies
-│   ├── start.sh                 # Start server
-│   └── stop.sh                  # Stop server
+│   ├── start.sh                 # Start Neo4j + bridge server
+│   └── stop.sh                  # Stop bridge server + Neo4j
 ├── tools/
 │   └── migrate_memory.py        # MEMORY.md → Neo4j migration
 └── README.md
 ```
-
-## Neo4j Labs
-
-This is a [Neo4j Labs](https://neo4j.com/labs/) project. APIs are subject to change. Community support via [community.neo4j.com](https://community.neo4j.com).
 
 ## License
 
