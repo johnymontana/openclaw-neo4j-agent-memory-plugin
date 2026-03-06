@@ -1,36 +1,46 @@
 {
-  "name": "neo4j-memory",
-  "version": "0.2.0",
+  "id": "openclaw-neo4j-memory",
+  "name": "Neo4j Memory",
+  "version": "0.1.2",
   "description": "Graph-native long-term memory for OpenClaw using Neo4j (auto-managed local instance)",
+  "kind": "memory",
   "skills": ["skills/"],
-  "config": [
-    {
-      "key": "memory.neo4j.port",
-      "required": false,
-      "default": "7575",
-      "description": "Bridge server port"
-    },
-    {
-      "key": "memory.neo4j.agent_id",
-      "required": false,
-      "default": "default",
-      "description": "Agent identity for memory namespace scoping"
-    },
-    {
-      "key": "memory.neo4j.instance",
-      "required": false,
-      "default": "openclaw-memory",
-      "description": "Neo4j local instance name"
-    },
-    {
-      "key": "memory.neo4j.observational",
-      "required": false,
-      "default": "false",
-      "description": "Enable observational memory (Phase 2 feature)"
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "bridgePort": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 65535,
+        "default": 7575
+      },
+      "agentId": {
+        "type": "string",
+        "default": "default"
+      },
+      "instance": {
+        "type": "string",
+        "default": "openclaw-memory"
+      },
+      "observational": {
+        "type": "boolean",
+        "default": false
+      }
     }
-  ],
-  "lifecycle": {
-    "start": "server/start.sh",
-    "stop": "server/stop.sh"
+  },
+  "uiHints": {
+    "bridgePort": {
+      "label": "Bridge Port"
+    },
+    "agentId": {
+      "label": "Agent ID"
+    },
+    "instance": {
+      "label": "Neo4j Instance"
+    },
+    "observational": {
+      "label": "Enable Observational Memory"
+    }
   }
 }
