@@ -37,8 +37,17 @@ function clearStreamHandlers() {
 // Track what execFileSync is called with
 let execFileSyncBehavior: (cmd: string, args: string[]) => string = () => "";
 
-// Track whether fs.existsSync returns true or false
+// Track virtualenv state in the mocked filesystem
 let venvExists = true;
+let venvPythonExists = true;
+let venvPython3Exists = true;
+let venvVersionedPythonExists = true;
+let pyvenvCfg = [
+  "home = /usr/local/opt/python@3.12/bin",
+  "include-system-site-packages = false",
+  "version = 3.12",
+  "executable = /usr/local/opt/python@3.12/bin/python3.12",
+].join("\n");
 
 // Mock child_process
 vi.mock("node:child_process", () => {
@@ -77,8 +86,50 @@ vi.mock("node:child_process", () => {
 
 // Mock fs
 vi.mock("node:fs", () => ({
-  existsSync: vi.fn(() => venvExists),
+  existsSync: vi.fn((target: string) => {
+    if (target.endsWith(`${pathSep()}.venv`)) return venvExists;
+    if (target.endsWith(`${pathSep()}pyvenv.cfg`)) return venvExists;
+    if (target.endsWith(`${pathSep()}bin${pathSep()}python`)) return venvPythonExists;
+    if (target.endsWith(`${pathSep()}bin${pathSep()}python3`)) return venvPython3Exists;
+    if (/bin[\\/]+python\d+\.\d+$/.test(target)) return venvVersionedPythonExists;
+    return true;
+  }),
+  statSync: vi.fn((target: string) => {
+    const exists =
+      (target.endsWith(`${pathSep()}bin${pathSep()}python`) && venvPythonExists) ||
+      (target.endsWith(`${pathSep()}bin${pathSep()}python3`) && venvPython3Exists) ||
+      (/bin[\\/]+python\d+\.\d+$/.test(target) && venvVersionedPythonExists) ||
+      (target.endsWith(`${pathSep()}.venv`) && venvExists);
+
+    if (!exists) {
+      throw new Error(`ENOENT: ${target}`);
+    }
+
+    return { mode: 0o755 };
+  }),
+  readFileSync: vi.fn((target: string) => {
+    if (target.endsWith(`${pathSep()}pyvenv.cfg`)) {
+      return pyvenvCfg;
+    }
+    return "";
+  }),
+  mkdirSync: vi.fn(() => undefined),
+  rmSync: vi.fn((target: string) => {
+    if (target.endsWith(`${pathSep()}bin${pathSep()}python`)) venvPythonExists = false;
+    if (target.endsWith(`${pathSep()}bin${pathSep()}python3`)) venvPython3Exists = false;
+    if (/bin[\\/]+python\d+\.\d+$/.test(target)) venvVersionedPythonExists = false;
+  }),
+  symlinkSync: vi.fn((source: string, target: string) => {
+    void source;
+    if (target.endsWith(`${pathSep()}bin${pathSep()}python`)) venvPythonExists = true;
+    if (target.endsWith(`${pathSep()}bin${pathSep()}python3`)) venvPython3Exists = true;
+    if (/bin[\\/]+python\d+\.\d+$/.test(target)) venvVersionedPythonExists = true;
+  }),
 }));
+
+function pathSep(): string {
+  return "/";
+}
 
 function makeOptions(overrides?: Partial<BridgeOptions>): BridgeOptions {
   return {
@@ -98,9 +149,21 @@ describe("BridgeServer", () => {
     clearProcessEventHandlers();
     clearStreamHandlers();
     venvExists = true;
+    venvPythonExists = true;
+    venvPython3Exists = true;
+    venvVersionedPythonExists = true;
+    pyvenvCfg = [
+      "home = /usr/local/opt/python@3.12/bin",
+      "include-system-site-packages = false",
+      "version = 3.12",
+      "executable = /usr/local/opt/python@3.12/bin/python3.12",
+    ].join("\n");
     execFileSyncBehavior = (cmd: string, args: string[]) => {
       if (args?.[0] === "-c" && args[1]?.includes("version_info")) {
-        return "3.11\n";
+        if (args[1]?.includes("sys.executable")) {
+          return "/usr/local/opt/python@3.12/bin/python3.12\n3.12\n";
+        }
+        return "3.12\n";
       }
       if (args?.[0] === "-c" && args[1]?.includes("import fastapi")) {
         return "";
@@ -184,6 +247,9 @@ describe("BridgeServer", () => {
     it("accepts python 3.10 exactly", async () => {
       execFileSyncBehavior = (cmd: string, args: string[]) => {
         if (args?.[0] === "-c" && args[1]?.includes("version_info")) {
+          if (args[1]?.includes("sys.executable")) {
+            return "/usr/local/opt/python@3.10/bin/python3.10\n3.10\n";
+          }
           return "3.10\n";
         }
         if (args?.[0] === "-c" && args[1]?.includes("import fastapi")) {
@@ -202,6 +268,9 @@ describe("BridgeServer", () => {
     it("accepts python 4.x (major version > 3)", async () => {
       execFileSyncBehavior = (cmd: string, args: string[]) => {
         if (args?.[0] === "-c" && args[1]?.includes("version_info")) {
+          if (args[1]?.includes("sys.executable")) {
+            return "/usr/local/opt/python@4.0/bin/python4.0\n4.0\n";
+          }
           return "4.0\n";
         }
         if (args?.[0] === "-c" && args[1]?.includes("import fastapi")) {
@@ -251,6 +320,25 @@ describe("BridgeServer", () => {
         expect.stringContaining("Creating virtualenv")
       );
     });
+
+    it("repairs a shipped venv when python shims are missing", async () => {
+      const { symlinkSync } = await import("node:fs");
+      const logger = { info: vi.fn(), warn: vi.fn() };
+      venvPythonExists = false;
+      venvPython3Exists = false;
+      venvVersionedPythonExists = false;
+
+      const bridge = new BridgeServer(makeOptions({ logger }));
+      vi.spyOn(bridge, "waitForHealth").mockResolvedValue();
+
+      await bridge.start();
+
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.stringContaining("Repairing packaged virtualenv interpreter shims")
+      );
+      expect(symlinkSync).toHaveBeenCalledTimes(3);
+      expect(bridge.getPid()).toBe(12345);
+    });
   });
 
   describe("installDependencies", () => {
@@ -260,6 +348,9 @@ describe("BridgeServer", () => {
 
       execFileSyncBehavior = (cmd: string, args: string[]) => {
         if (args?.[0] === "-c" && args[1]?.includes("version_info")) {
+          if (args[1]?.includes("sys.executable")) {
+            return "/usr/local/opt/python@3.12/bin/python3.12\n3.12\n";
+          }
           return "3.11\n";
         }
         if (args?.[0] === "-c" && args[1]?.includes("import fastapi")) {
@@ -281,16 +372,16 @@ describe("BridgeServer", () => {
       expect(logger.info).toHaveBeenCalledWith(
         expect.stringContaining("Installing Python dependencies")
       );
-      // pip install --upgrade pip
+      // python -m pip install --upgrade pip
       expect(execFileSync).toHaveBeenCalledWith(
-        expect.stringContaining("pip"),
-        expect.arrayContaining(["install", "--upgrade", "pip"]),
+        expect.stringContaining("python"),
+        expect.arrayContaining(["-m", "pip", "install", "--upgrade", "pip"]),
         expect.any(Object)
       );
-      // pip install -r requirements.txt
+      // python -m pip install -r requirements.txt
       expect(execFileSync).toHaveBeenCalledWith(
-        expect.stringContaining("pip"),
-        expect.arrayContaining(["install", "-r"]),
+        expect.stringContaining("python"),
+        expect.arrayContaining(["-m", "pip", "install", "-r"]),
         expect.any(Object)
       );
     });

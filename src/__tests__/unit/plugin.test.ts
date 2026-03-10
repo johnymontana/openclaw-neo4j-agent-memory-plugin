@@ -1,10 +1,50 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { PLUGIN_ID, SERVICE_ID } from "../../config";
+
+let mockHttpResponses: Array<number | Error> = [];
+
+vi.mock("node:http", () => ({
+  request: vi.fn((...args: unknown[]) => {
+    const callback = args[args.length - 1] as (res: {
+      statusCode?: number;
+      resume: () => void;
+    }) => void;
+    let errorHandler: ((error: Error) => void) | undefined;
+
+    const req = {
+      on: vi.fn((event: string, handler: (error: Error) => void) => {
+        if (event === "error") {
+          errorHandler = handler;
+        }
+        return req;
+      }),
+      setTimeout: vi.fn((_timeout: number, _handler: () => void) => req),
+      write: vi.fn(),
+      end: vi.fn(() => {
+        const response = mockHttpResponses.shift() ?? 200;
+        if (response instanceof Error) {
+          errorHandler?.(response);
+          return;
+        }
+
+        callback({ statusCode: response, resume: vi.fn() });
+      }),
+      destroy: vi.fn((error?: Error) => {
+        if (error) {
+          errorHandler?.(error);
+        }
+      }),
+    };
+
+    return req;
+  }),
+}));
 
 // Capture mock instances for assertions
 let mockNeo4jLocalInstance: {
   start: ReturnType<typeof vi.fn>;
   stop: ReturnType<typeof vi.fn>;
+  reset: ReturnType<typeof vi.fn>;
   getCredentials: ReturnType<typeof vi.fn>;
 };
 
@@ -22,12 +62,15 @@ vi.mock("@johnymontana/neo4j-local", () => ({
         uri: "bolt://localhost:7687",
         username: "neo4j",
         password: "test-password",
+        httpUrl: "http://localhost:7474",
       }),
       stop: vi.fn().mockResolvedValue(undefined),
+      reset: vi.fn().mockResolvedValue(undefined),
       getCredentials: vi.fn().mockReturnValue({
         uri: "bolt://localhost:7687",
         username: "neo4j",
         password: "test-password",
+        httpUrl: "http://localhost:7474",
       }),
     };
     return mockNeo4jLocalInstance;
@@ -63,6 +106,11 @@ function makeApi(configOverrides?: Record<string, unknown>) {
 describe("plugin", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockHttpResponses = [200];
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("exports correct id and name", async () => {
@@ -121,6 +169,8 @@ describe("plugin", () => {
       bridgePort: 9999,
       agentId: "custom-agent",
       instance: "my-neo4j",
+      neo4jPorts: { bolt: 17687, http: 17474, https: 17473 },
+      ephemeral: true,
     });
 
     plugin.register(api);
@@ -128,13 +178,119 @@ describe("plugin", () => {
     await service.start();
 
     expect(Neo4jLocal).toHaveBeenCalledWith(
-      expect.objectContaining({ instanceName: "my-neo4j" })
+      expect.objectContaining({
+        instanceName: "my-neo4j",
+        ports: { bolt: 17687, http: 17474, https: 17473 },
+        ephemeral: true,
+      })
     );
     expect(BridgeServer).toHaveBeenCalledWith(
       expect.objectContaining({
         bridgePort: 9999,
         agentId: "custom-agent",
       })
+    );
+  });
+
+  it("resets the managed instance when Neo4j rejects generated credentials", async () => {
+    const { BridgeServer } = await import("../../bridge");
+    const { Neo4jLocal } = await import("@johnymontana/neo4j-local");
+    const plugin = (await import("../../index")).default ?? await import("../../index");
+
+    const neo4jCtor = Neo4jLocal as ReturnType<typeof vi.fn>;
+    neo4jCtor.mockImplementationOnce(() => {
+      mockNeo4jLocalInstance = {
+        start: vi
+          .fn()
+          .mockResolvedValueOnce({
+            uri: "bolt://localhost:7687",
+            username: "neo4j",
+            password: "stale-password",
+            httpUrl: "http://localhost:7474",
+          })
+          .mockResolvedValueOnce({
+            uri: "bolt://localhost:7687",
+            username: "neo4j",
+            password: "fresh-password",
+            httpUrl: "http://localhost:7474",
+          }),
+        stop: vi.fn().mockResolvedValue(undefined),
+        reset: vi.fn().mockResolvedValue(undefined),
+        getCredentials: vi.fn(),
+      };
+      return mockNeo4jLocalInstance;
+    });
+
+    mockHttpResponses = [401, 200];
+
+    const api = makeApi();
+    plugin.register(api);
+    const service = api.registerService.mock.calls[0][0];
+
+    await service.start();
+
+    expect(mockNeo4jLocalInstance.reset).toHaveBeenCalledOnce();
+    expect(mockNeo4jLocalInstance.start).toHaveBeenCalledTimes(2);
+    expect(BridgeServer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        neo4jPassword: "fresh-password",
+      })
+    );
+    expect(api.logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("resetting the Neo4j data directory")
+    );
+  });
+
+  it("waits for recovered credentials to clear transient auth rate limits", async () => {
+    vi.useFakeTimers();
+
+    const { BridgeServer } = await import("../../bridge");
+    const { Neo4jLocal } = await import("@johnymontana/neo4j-local");
+    const plugin = (await import("../../index")).default ?? await import("../../index");
+
+    const neo4jCtor = Neo4jLocal as ReturnType<typeof vi.fn>;
+    neo4jCtor.mockImplementationOnce(() => {
+      mockNeo4jLocalInstance = {
+        start: vi
+          .fn()
+          .mockResolvedValueOnce({
+            uri: "bolt://localhost:7687",
+            username: "neo4j",
+            password: "stale-password",
+            httpUrl: "http://localhost:7474",
+          })
+          .mockResolvedValueOnce({
+            uri: "bolt://localhost:7687",
+            username: "neo4j",
+            password: "fresh-password",
+            httpUrl: "http://localhost:7474",
+          }),
+        stop: vi.fn().mockResolvedValue(undefined),
+        reset: vi.fn().mockResolvedValue(undefined),
+        getCredentials: vi.fn(),
+      };
+      return mockNeo4jLocalInstance;
+    });
+
+    mockHttpResponses = [401, 429, 429, 200];
+
+    const api = makeApi();
+    plugin.register(api);
+    const service = api.registerService.mock.calls[0][0];
+
+    const startPromise = service.start();
+    await vi.runAllTimersAsync();
+    await startPromise;
+
+    expect(mockNeo4jLocalInstance.reset).toHaveBeenCalledOnce();
+    expect(mockNeo4jLocalInstance.start).toHaveBeenCalledTimes(2);
+    expect(BridgeServer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        neo4jPassword: "fresh-password",
+      })
+    );
+    expect(api.logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("Neo4j auth probe returned HTTP 429")
     );
   });
 

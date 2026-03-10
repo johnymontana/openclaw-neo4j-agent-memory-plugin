@@ -2,6 +2,7 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    fileParallelism: false,
     projects: [
       {
         test: {
@@ -21,6 +22,8 @@ export default defineConfig({
         test: {
           name: "e2e",
           include: ["src/__tests__/e2e/**/*.test.ts"],
+          fileParallelism: false,
+          hookTimeout: 120000,
           testTimeout: 180000,
         },
       },

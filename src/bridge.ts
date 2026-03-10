@@ -5,6 +5,7 @@ import * as http from "node:http";
 
 const MIN_PYTHON_MAJOR = 3;
 const MIN_PYTHON_MINOR = 10;
+const BRIDGE_HEALTH_STARTUP_TIMEOUT_SECONDS = 30;
 
 export interface BridgeOptions {
   bridgePort: number;
@@ -16,6 +17,18 @@ export interface BridgeOptions {
     info(msg: string): void;
     warn(msg: string): void;
   };
+}
+
+interface PythonRuntime {
+  command: string;
+  executable: string;
+  version: string;
+}
+
+interface PyVenvConfig {
+  executable?: string;
+  home?: string;
+  version?: string;
 }
 
 export class BridgeServer {
@@ -34,10 +47,9 @@ export class BridgeServer {
     const python = this.findPython();
     this.options.logger.info(`[openclaw-neo4j-memory] Using ${python}`);
 
-    this.ensureVenv(python);
-    this.installDependencies();
+    const venvPython = this.ensureVenv(python);
+    this.installDependencies(venvPython);
 
-    const venvPython = path.join(this.venvDir, "bin", "python");
     const mainScript = path.join(this.serverDir, "main.py");
 
     this.process = spawn(venvPython, [mainScript], {
@@ -83,7 +95,10 @@ export class BridgeServer {
       });
     });
 
-    await Promise.race([this.waitForHealth(15), earlyExit]);
+    await Promise.race([
+      this.waitForHealth(BRIDGE_HEALTH_STARTUP_TIMEOUT_SECONDS),
+      earlyExit,
+    ]);
     this.options.logger.info(
       `[openclaw-neo4j-memory] Bridge server started (PID ${this.process.pid})`
     );
@@ -154,7 +169,109 @@ export class BridgeServer {
     );
   }
 
-  private ensureVenv(python: string): void {
+  private inspectPython(command: string): PythonRuntime {
+    const output = execFileSync(command, [
+      "-c",
+      "import sys; print(sys.executable); print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+    ], { encoding: "utf8", timeout: 5000 });
+
+    const [executable, version] = output
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    if (!executable || !version) {
+      throw new Error(`Unable to inspect Python runtime for ${command}`);
+    }
+
+    return { command, executable, version };
+  }
+
+  private getVenvPythonCandidates(version?: string): string[] {
+    const binDir = path.join(this.venvDir, "bin");
+    return Array.from(new Set([
+      path.join(binDir, "python"),
+      path.join(binDir, "python3"),
+      version ? path.join(binDir, `python${version}`) : null,
+    ].filter((candidate): candidate is string => Boolean(candidate))));
+  }
+
+  private isRunnableExecutable(filePath: string): boolean {
+    try {
+      if (!fs.existsSync(filePath)) {
+        return false;
+      }
+
+      return (fs.statSync(filePath).mode & 0o111) !== 0;
+    } catch {
+      return false;
+    }
+  }
+
+  private readPyVenvConfig(): PyVenvConfig {
+    const configPath = path.join(this.venvDir, "pyvenv.cfg");
+    if (!fs.existsSync(configPath)) {
+      return {};
+    }
+
+    try {
+      const raw = fs.readFileSync(configPath, "utf8");
+      const parsed: PyVenvConfig = {};
+
+      for (const line of raw.split(/\r?\n/)) {
+        const [rawKey, ...rest] = line.split("=");
+        if (!rawKey || rest.length === 0) {
+          continue;
+        }
+
+        const key = rawKey.trim();
+        const value = rest.join("=").trim();
+        if (key === "version") parsed.version = value;
+        if (key === "home") parsed.home = value;
+        if (key === "executable") parsed.executable = value;
+      }
+
+      return parsed;
+    } catch {
+      return {};
+    }
+  }
+
+  private repairPackagedVenv(runtime: PythonRuntime): void {
+    const config = this.readPyVenvConfig();
+    const version = config.version ?? runtime.version;
+    const candidates = this.getVenvPythonCandidates(version);
+    const needsRepair = candidates.some((candidate) => !this.isRunnableExecutable(candidate));
+
+    if (!needsRepair) {
+      return;
+    }
+
+    const binDir = path.join(this.venvDir, "bin");
+    this.options.logger.info(
+      `[openclaw-neo4j-memory] Repairing packaged virtualenv interpreter shims in ${binDir}`
+    );
+
+    fs.mkdirSync(binDir, { recursive: true });
+    for (const candidate of candidates) {
+      fs.rmSync(candidate, { force: true });
+      fs.symlinkSync(runtime.executable, candidate);
+    }
+  }
+
+  private resolveVenvPython(version?: string): string {
+    for (const candidate of this.getVenvPythonCandidates(version)) {
+      if (this.isRunnableExecutable(candidate)) {
+        return candidate;
+      }
+    }
+
+    throw new Error(
+      `[openclaw-neo4j-memory] Virtualenv is missing a runnable Python interpreter in ${this.venvDir}`
+    );
+  }
+
+  private ensureVenv(python: string): string {
     if (!fs.existsSync(this.venvDir)) {
       this.options.logger.info(
         `[openclaw-neo4j-memory] Creating virtualenv in ${this.venvDir}`
@@ -163,10 +280,13 @@ export class BridgeServer {
         timeout: 30000,
       });
     }
+
+    const runtime = this.inspectPython(python);
+    this.repairPackagedVenv(runtime);
+    return this.resolveVenvPython(this.readPyVenvConfig().version ?? runtime.version);
   }
 
-  private installDependencies(): void {
-    const venvPython = path.join(this.venvDir, "bin", "python");
+  private installDependencies(venvPython: string): void {
     const requirementsFile = path.join(this.serverDir, "requirements.txt");
 
     try {
@@ -182,11 +302,10 @@ export class BridgeServer {
     this.options.logger.info(
       `[openclaw-neo4j-memory] Installing Python dependencies`
     );
-    const venvPip = path.join(this.venvDir, "bin", "pip");
-    execFileSync(venvPip, ["install", "--upgrade", "pip", "--quiet"], {
+    execFileSync(venvPython, ["-m", "pip", "install", "--upgrade", "pip", "--quiet"], {
       timeout: 60000,
     });
-    execFileSync(venvPip, ["install", "-r", requirementsFile, "--quiet"], {
+    execFileSync(venvPython, ["-m", "pip", "install", "-r", requirementsFile, "--quiet"], {
       timeout: 120000,
     });
   }

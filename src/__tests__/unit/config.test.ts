@@ -82,6 +82,8 @@ describe("getResolvedConfig", () => {
       bridgePort: DEFAULTS.bridgePort,
       agentId: DEFAULTS.agentId,
       instance: DEFAULTS.instance,
+      neo4jPorts: undefined,
+      ephemeral: false,
       observational: false,
     });
   });
@@ -97,6 +99,8 @@ describe("getResolvedConfig", () => {
       bridgePort: 8080,
       agentId: "my-agent",
       instance: DEFAULTS.instance,
+      neo4jPorts: undefined,
+      ephemeral: false,
       observational: false,
     });
   });
@@ -108,6 +112,8 @@ describe("getResolvedConfig", () => {
           bridgePort: 3000,
           agentId: "custom",
           instance: "my-db",
+          neo4jPorts: { bolt: 18687, http: 18474, https: 18473 },
+          ephemeral: true,
           observational: true,
         },
       },
@@ -117,6 +123,8 @@ describe("getResolvedConfig", () => {
       bridgePort: 3000,
       agentId: "custom",
       instance: "my-db",
+      neo4jPorts: { bolt: 18687, http: 18474, https: 18473 },
+      ephemeral: true,
       observational: true,
     });
   });
