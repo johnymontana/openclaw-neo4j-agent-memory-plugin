@@ -37,6 +37,7 @@ This will automatically:
 - Download and start a local Neo4j instance (via [`@johnymontana/neo4j-local`](https://www.npmjs.com/package/@johnymontana/neo4j-local))
 - Launch the FastAPI bridge server
 - Configure credentials automatically — no manual Neo4j setup required
+- Reuse the packaged `server/.venv` and repair its local Python launcher shims on first run if the install strips them
 
 OpenClaw may warn that the plugin contains shell-command execution. That is expected for this plugin: the runtime entry starts and stops the existing `server/start.sh` and `server/stop.sh` lifecycle scripts.
 
@@ -50,6 +51,28 @@ The plugin ships four skills your agent learns automatically:
 | `neo4j-memory-recall` | :brain: | Retrieve relevant context from the graph |
 | `neo4j-memory-query` | :mag: | Run structured or Cypher queries against the knowledge graph |
 | `neo4j-memory-trace` | :link: | Record and query reasoning traces |
+
+### 3. Convert an Existing Agent Package
+
+If your agent package still uses `MEMORY.md` or `memory/YYYY-MM-DD.md`, update it right after installing the plugin:
+
+1. Read the `neo4j-memory-store`, `neo4j-memory-recall`, and `neo4j-memory-query` skills.
+2. Rewrite the Memory section of `AGENTS.md` so Neo4j is the primary store for both daily notes and long-term memory, replacing the `memory/YYYY-MM-DD.md` and `MEMORY.md` patterns.
+3. Migrate the current contents of `MEMORY.md` into Neo4j.
+4. Test that one write and one read both work before finishing the migration.
+
+You can do that manually, or ask the agent to perform the migration end-to-end:
+
+```bash
+openclaw agent --agent main --message "Update AGENTS.md to use Neo4j as the primary memory store instead of .md files.
+Specifically:
+1. Read the neo4j-memory-store, neo4j-memory-recall, and neo4j-memory-query skill files to understand how they work
+2. Rewrite the Memory section of AGENTS.md to use Neo4j for both daily notes and long-term memory (replace the memory/YYYY-MM-DD.md and MEMORY.md patterns)
+3. Migrate the current contents of MEMORY.md into Neo4j so nothing is lost
+4. Test that a write and read both work before finishing"
+```
+
+If you installed an older build of this plugin, upgrade to the latest package before relying on `/memory/recall` or `/memory/context`.
 
 ## Architecture
 

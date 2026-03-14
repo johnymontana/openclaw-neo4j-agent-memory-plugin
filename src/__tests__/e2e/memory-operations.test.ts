@@ -4,6 +4,11 @@ import * as http from "node:http";
 const plugin = require("../../../dist/index");
 
 const BRIDGE_PORT = 17576;
+const NEO4J_PORTS = {
+  bolt: 18687,
+  http: 18474,
+  https: 18473,
+};
 const INSTANCE_NAME = `e2e-memory-${Date.now()}`;
 
 function makeApi() {
@@ -16,6 +21,8 @@ function makeApi() {
               bridgePort: BRIDGE_PORT,
               agentId: "e2e-memory-test",
               instance: INSTANCE_NAME,
+              neo4jPorts: NEO4J_PORTS,
+              ephemeral: true,
             },
           },
         },

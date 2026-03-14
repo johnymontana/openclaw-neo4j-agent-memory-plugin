@@ -47,6 +47,197 @@ logger = logging.getLogger("neo4j-memory-bridge")
 memory: Optional[MemoryClient] = None
 
 
+def _is_embedding_dependency_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "openai package not installed" in message
+        or "no module named 'openai'" in message
+        or "embeddingerror" in type(exc).__name__.lower()
+    )
+
+
+def _sanitize_properties(properties: dict) -> dict:
+    sanitized = {}
+    for key, value in properties.items():
+        key_lower = key.lower()
+        if "embedding" in key_lower or "vector" in key_lower:
+            continue
+        if isinstance(value, list) and len(value) > 20:
+            continue
+        sanitized[key] = _make_json_safe(value)
+    return sanitized
+
+
+def _make_json_safe(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [_make_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_make_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _make_json_safe(item) for key, item in value.items()}
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
+    return str(value)
+
+
+async def _fallback_search_records(query: str, limit: int) -> list[dict]:
+    graph_client = memory.graph
+    search_query = query.strip().lower()
+    if not search_query:
+        return []
+
+    cypher = """
+    MATCH (n)
+    WHERE any(key IN keys(n)
+      WHERE n[key] IS NOT NULL
+        AND toLower(toString(n[key])) CONTAINS $query)
+    OPTIONAL MATCH (n)-[r]-(m)
+    WITH n,
+         labels(n) AS labels,
+         properties(n) AS props,
+         elementId(n) AS element_id,
+         collect(DISTINCT CASE
+           WHEN r IS NULL OR m IS NULL THEN NULL
+           ELSE {
+             type: type(r),
+             target_labels: labels(m),
+             target_name: coalesce(m.name, m.title, m.subject, m.content, elementId(m))
+           }
+         END)[..5] AS raw_relationships
+    RETURN labels,
+           props,
+           element_id,
+           [rel IN raw_relationships WHERE rel IS NOT NULL] AS relationships
+    LIMIT $limit
+    """
+
+    return await graph_client.execute_read(
+        cypher,
+        {"query": search_query, "limit": limit},
+    )
+
+
+async def _fallback_query_records(
+    entity_type: Optional[str],
+    name: Optional[str],
+    limit: int,
+) -> list[dict]:
+    graph_client = memory.graph
+    normalized_name = name.strip().lower() if name else None
+    normalized_entity_type = entity_type.strip().upper() if entity_type else None
+
+    cypher = """
+    MATCH (n)
+    WHERE ($entity_type IS NULL
+           OR any(label IN labels(n) WHERE toUpper(label) = $entity_type)
+           OR toUpper(coalesce(toString(n.entity_type), "")) = $entity_type)
+      AND ($name IS NULL
+           OR any(key IN keys(n)
+                  WHERE n[key] IS NOT NULL
+                    AND toLower(toString(n[key])) CONTAINS $name))
+    OPTIONAL MATCH (n)-[r]-(m)
+    WITH n,
+         labels(n) AS labels,
+         properties(n) AS props,
+         elementId(n) AS element_id,
+         collect(DISTINCT CASE
+           WHEN r IS NULL OR m IS NULL THEN NULL
+           ELSE {
+             type: type(r),
+             target_labels: labels(m),
+             target_name: coalesce(m.name, m.title, m.subject, m.content, elementId(m))
+           }
+         END)[..5] AS raw_relationships
+    RETURN labels,
+           props,
+           element_id,
+           [rel IN raw_relationships WHERE rel IS NOT NULL] AS relationships
+    LIMIT $limit
+    """
+
+    return await graph_client.execute_read(
+        cypher,
+        {
+            "entity_type": normalized_entity_type,
+            "name": normalized_name,
+            "limit": limit,
+        },
+    )
+
+
+def _record_to_recall_result(record: dict) -> dict:
+    props = _sanitize_properties(record.get("props", {}))
+    labels = [_make_json_safe(label) for label in record.get("labels", [])]
+
+    entity_type = props.get("entity_type")
+    if not entity_type:
+        entity_type = next(
+            (label for label in labels if label not in {"Entity", "Message", "Observation"}),
+            labels[0] if labels else "Object",
+        )
+
+    name = (
+        props.get("name")
+        or props.get("title")
+        or props.get("subject")
+        or record.get("element_id")
+        or "unknown"
+    )
+    description = props.get("description") or props.get("content") or ""
+
+    result = {
+        "name": name,
+        "entity_type": entity_type,
+        "description": description,
+        "_labels": labels,
+        "_relationships": _make_json_safe(record.get("relationships", [])),
+    }
+
+    for key, value in props.items():
+        if key not in result:
+            result[key] = value
+
+    return result
+
+
+def _build_context_from_results(results: list[dict]) -> str:
+    sections = []
+    for index, result in enumerate(results, start=1):
+        lines = [f"[{index}] {result.get('name', 'unknown')} ({result.get('entity_type', 'Object')})"]
+
+        description = result.get("description")
+        if description:
+            lines.append(str(description))
+
+        attributes = []
+        for key, value in result.items():
+            if key.startswith("_") or key in {"name", "entity_type", "description"}:
+                continue
+            attributes.append(f"{key}: {value}")
+        if attributes:
+            lines.append("Attributes: " + "; ".join(attributes[:5]))
+
+        relationships = result.get("_relationships") or []
+        if relationships:
+            lines.append(
+                "Related: "
+                + "; ".join(
+                    f"{rel['type']} -> {rel['target_name']}"
+                    for rel in relationships[:5]
+                    if rel.get("type") and rel.get("target_name")
+                )
+            )
+
+        sections.append("\n".join(lines))
+
+    return "\n\n".join(sections)
+
+
 def _create_client() -> MemoryClient:
     """Create a MemoryClient with Neo4j config from environment."""
     settings = MemorySettings(
@@ -59,7 +250,7 @@ def _create_client() -> MemoryClient:
     return MemoryClient(settings)
 
 
-def _connect_with_retry(max_retries: int = 5, delay: float = 2.0):
+async def _connect_with_retry(max_retries: int = 12, delay: float = 2.0):
     """Connect to Neo4j with retry logic for startup race conditions."""
     global memory
     last_error = None
@@ -67,14 +258,14 @@ def _connect_with_retry(max_retries: int = 5, delay: float = 2.0):
     for attempt in range(1, max_retries + 1):
         try:
             memory = _create_client()
-            memory.connect()
+            await memory.connect()
             logger.info("Connected to Neo4j at %s", NEO4J_URI)
             return
         except Exception as e:
             last_error = e
             if memory:
                 try:
-                    memory.close()
+                    await memory.close()
                 except Exception:
                     pass
                 memory = None
@@ -83,7 +274,7 @@ def _connect_with_retry(max_retries: int = 5, delay: float = 2.0):
                     "Neo4j not ready (attempt %d/%d): %s — retrying in %.0fs",
                     attempt, max_retries, e, delay,
                 )
-                time.sleep(delay)
+                await asyncio.sleep(delay)
             else:
                 logger.error(
                     "Failed to connect to Neo4j after %d attempts: %s",
@@ -97,10 +288,10 @@ def _connect_with_retry(max_retries: int = 5, delay: float = 2.0):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await asyncio.to_thread(_connect_with_retry)
+    await _connect_with_retry()
     yield
     if memory:
-        memory.close()
+        await memory.close()
         logger.info("Memory client closed")
 
 
@@ -234,16 +425,16 @@ async def memory_store(req: StoreRequest):
     session_id = req.session_id or f"session-{uuid.uuid4().hex[:12]}"
 
     if req.type == "entity":
-        return await asyncio.to_thread(_store_entity, req.data, session_id)
+        return await _store_entity(req.data, session_id)
     elif req.type == "message":
-        return await asyncio.to_thread(_store_message, req.data, session_id)
+        return await _store_message(req.data, session_id)
     elif req.type == "observation":
-        return await asyncio.to_thread(_store_observation, req.data, session_id)
+        return await _store_observation(req.data, session_id)
     else:
         raise HTTPException(status_code=400, detail=f"Unknown store type: {req.type}")
 
 
-def _store_entity(data: dict, session_id: str) -> StoreResponse:
+async def _store_entity(data: dict, session_id: str) -> StoreResponse:
     entity_data = EntityData(**data)
     props = entity_data.properties
     name = props.get("name", f"{entity_data.label}-{uuid.uuid4().hex[:8]}")
@@ -253,7 +444,7 @@ def _store_entity(data: dict, session_id: str) -> StoreResponse:
     # Build attributes from remaining properties
     attributes = {k: v for k, v in props.items() if k not in ("name", "description")}
 
-    entity, dedup = memory.long_term.add_entity(
+    entity, dedup = await memory.long_term.add_entity(
         name=name,
         entity_type=entity_type,
         description=description,
@@ -271,7 +462,7 @@ def _store_entity(data: dict, session_id: str) -> StoreResponse:
     # Create relationships
     for rel in entity_data.relationships:
         target_type = LABEL_TO_ENTITY_TYPE.get(rel.target_label, "OBJECT")
-        target_entity, _ = memory.long_term.add_entity(
+        target_entity, _ = await memory.long_term.add_entity(
             name=rel.target_name,
             entity_type=target_type,
             attributes=rel.target_properties if rel.target_properties else None,
@@ -281,7 +472,7 @@ def _store_entity(data: dict, session_id: str) -> StoreResponse:
             geocode=False,
             enrich=False,
         )
-        memory.long_term.add_relationship(
+        await memory.long_term.add_relationship(
             source=entity,
             target=target_entity,
             relationship_type=rel.type,
@@ -290,9 +481,9 @@ def _store_entity(data: dict, session_id: str) -> StoreResponse:
     return StoreResponse(status="stored", node_id=node_id, merged=was_merged)
 
 
-def _store_message(data: dict, session_id: str) -> StoreResponse:
+async def _store_message(data: dict, session_id: str) -> StoreResponse:
     msg = MessageData(**data)
-    result = memory.short_term.add_message(
+    result = await memory.short_term.add_message(
         session_id=session_id,
         role=msg.role,
         content=msg.content,
@@ -302,12 +493,12 @@ def _store_message(data: dict, session_id: str) -> StoreResponse:
     return StoreResponse(status="stored", node_id=str(result.id), merged=False)
 
 
-def _store_observation(data: dict, session_id: str) -> StoreResponse:
+async def _store_observation(data: dict, session_id: str) -> StoreResponse:
     content = data.get("content", "")
     subject = data.get("subject")
 
     if subject:
-        fact = memory.long_term.add_fact(
+        fact = await memory.long_term.add_fact(
             subject=subject,
             predicate="observed",
             obj=content,
@@ -315,7 +506,7 @@ def _store_observation(data: dict, session_id: str) -> StoreResponse:
         )
         return StoreResponse(status="stored", node_id=str(fact.id), merged=False)
     else:
-        entity, dedup = memory.long_term.add_entity(
+        entity, dedup = await memory.long_term.add_entity(
             name=f"observation-{uuid.uuid4().hex[:8]}",
             entity_type="OBJECT",
             description=content,
@@ -336,10 +527,10 @@ def _store_observation(data: dict, session_id: str) -> StoreResponse:
 async def memory_recall(req: RecallRequest):
     """Retrieve context relevant to a query."""
 
-    def _recall():
-        results = []
+    results = []
 
-        entities = memory.long_term.search_entities(
+    try:
+        entities = await memory.long_term.search_entities(
             query=req.query,
             limit=req.limit,
             threshold=0.0,
@@ -355,17 +546,16 @@ async def memory_recall(req: RecallRequest):
             if entity.attributes:
                 entity_dict.update(entity.attributes)
 
-            # Get relationships
             try:
-                related = memory.long_term.get_related_entities(entity)
-                rels = []
-                for related_entity, relationship in related:
-                    rels.append({
+                related = await memory.long_term.get_related_entities(entity)
+                entity_dict["_relationships"] = [
+                    {
                         "type": relationship.relationship_type,
                         "target_labels": [related_entity.entity_type],
                         "target_name": related_entity.name,
-                    })
-                entity_dict["_relationships"] = rels
+                    }
+                    for related_entity, relationship in related
+                ]
             except Exception:
                 entity_dict["_relationships"] = []
 
@@ -373,7 +563,7 @@ async def memory_recall(req: RecallRequest):
 
         if req.include_reasoning:
             try:
-                traces = memory.reasoning.list_traces(
+                traces = await memory.reasoning.list_traces(
                     session_id=req.session_id,
                     limit=5,
                 )
@@ -386,10 +576,11 @@ async def memory_recall(req: RecallRequest):
                     })
             except Exception:
                 pass
+    except Exception as exc:
+        logger.warning("Recall falling back to direct graph search: %s", exc)
+        records = await _fallback_search_records(req.query, req.limit)
+        results = [_record_to_recall_result(record) for record in records]
 
-        return results
-
-    results = await asyncio.to_thread(_recall)
     return RecallResponse(results=results, count=len(results), query=req.query)
 
 
@@ -401,43 +592,28 @@ async def memory_recall(req: RecallRequest):
 async def memory_query(req: QueryRequest):
     """Execute structured entity queries or free-form Cypher."""
 
-    def _query():
-        if req.cypher:
-            # Free-form Cypher via the underlying Neo4j driver
-            graph_client = memory._graph
-            with graph_client._driver.session() as session:
-                result = session.run(req.cypher, **req.params)
-                records = []
-                for record in result:
-                    row = {}
-                    for key, value in record.items():
-                        if hasattr(value, "items"):
-                            row[key] = dict(value)
-                        elif hasattr(value, "element_id"):
-                            row[key] = dict(value)
-                        else:
-                            row[key] = value
-                    records.append(row)
-                return records
+    if req.cypher:
+        records = await memory.graph.execute_read(req.cypher, req.params)
+        return QueryResponse(results=records, count=len(records))
 
-        # Template-based entity query
+    records = []
+    try:
         entity_types = [req.entity_type] if req.entity_type else None
         if req.name:
-            entities = memory.long_term.search_entities(
+            entities = await memory.long_term.search_entities(
                 query=req.name,
                 entity_types=entity_types,
                 limit=req.limit,
                 threshold=0.0,
             )
         else:
-            entities = memory.long_term.search_entities(
+            entities = await memory.long_term.search_entities(
                 query="*",
                 entity_types=entity_types,
                 limit=req.limit,
                 threshold=0.0,
             )
 
-        records = []
         for entity in entities:
             node_data = {
                 "name": entity.name,
@@ -446,10 +622,10 @@ async def memory_query(req: QueryRequest):
                 "_labels": [entity.entity_type],
             }
             if entity.attributes:
-                node_data.update(entity.attributes)
+                node_data.update(_sanitize_properties(entity.attributes))
 
             try:
-                related = memory.long_term.get_related_entities(entity)
+                related = await memory.long_term.get_related_entities(entity)
                 node_data["_relationships"] = [
                     {"type": r.relationship_type, "target": re.name}
                     for re, r in related
@@ -459,10 +635,11 @@ async def memory_query(req: QueryRequest):
                 node_data["_relationships"] = []
 
             records.append(node_data)
+    except Exception as exc:
+        logger.warning("Query falling back to direct graph search: %s", exc)
+        fallback_records = await _fallback_query_records(req.entity_type, req.name, req.limit)
+        records = [_record_to_recall_result(record) for record in fallback_records]
 
-        return records
-
-    records = await asyncio.to_thread(_query)
     return QueryResponse(results=records, count=len(records))
 
 
@@ -476,36 +653,36 @@ async def memory_trace(req: TraceRequest):
     session_id = req.session_id or f"session-{uuid.uuid4().hex[:12]}"
 
     if req.type == "tool_call":
-        return await asyncio.to_thread(_trace_tool_call, req.data, session_id, req.message_id)
+        return await _trace_tool_call(req.data, session_id, req.message_id)
     elif req.type == "reasoning_step":
-        return await asyncio.to_thread(_trace_reasoning_step, req.data, session_id)
+        return await _trace_reasoning_step(req.data, session_id)
     elif req.type == "skill_invocation":
-        return await asyncio.to_thread(_trace_skill_invocation, req.data, session_id)
+        return await _trace_skill_invocation(req.data, session_id)
     else:
         raise HTTPException(status_code=400, detail=f"Unknown trace type: {req.type}")
 
 
-def _trace_tool_call(data: dict, session_id: str, message_id: Optional[str]) -> TraceResponse:
+async def _trace_tool_call(data: dict, session_id: str, message_id: Optional[str]) -> TraceResponse:
     tool_name = data.get("tool", "unknown")
     description = data.get("description", "")
     input_data = data.get("input", "")
     output_data = data.get("output", "")
     duration_ms = data.get("duration_ms")
 
-    trace = memory.reasoning.start_trace(
+    trace = await memory.reasoning.start_trace(
         session_id=session_id,
         task=description or f"Tool call: {tool_name}",
         generate_embedding=False,
     )
 
-    step = memory.reasoning.add_step(
+    step = await memory.reasoning.add_step(
         trace_id=trace.id,
         thought=f"Calling tool: {tool_name}",
         action=str(input_data),
         generate_embedding=False,
     )
 
-    tool_call = memory.reasoning.record_tool_call(
+    await memory.reasoning.record_tool_call(
         step_id=step.id,
         tool_name=tool_name,
         arguments={"input": input_data},
@@ -513,7 +690,7 @@ def _trace_tool_call(data: dict, session_id: str, message_id: Optional[str]) -> 
         duration_ms=duration_ms,
     )
 
-    memory.reasoning.complete_trace(
+    await memory.reasoning.complete_trace(
         trace_id=trace.id,
         outcome=str(output_data)[:500] if output_data else None,
         success=True,
@@ -521,31 +698,31 @@ def _trace_tool_call(data: dict, session_id: str, message_id: Optional[str]) -> 
 
     if message_id:
         try:
-            memory.reasoning.link_trace_to_message(trace.id, message_id)
+            await memory.reasoning.link_trace_to_message(trace.id, message_id)
         except Exception:
             pass
 
     return TraceResponse(status="recorded", trace_id=str(trace.id))
 
 
-def _trace_reasoning_step(data: dict, session_id: str) -> TraceResponse:
+async def _trace_reasoning_step(data: dict, session_id: str) -> TraceResponse:
     content = data.get("content", "")
     step_type = data.get("step_type", "inference")
 
-    trace = memory.reasoning.start_trace(
+    trace = await memory.reasoning.start_trace(
         session_id=session_id,
         task=f"Reasoning: {step_type}",
         generate_embedding=False,
     )
 
-    memory.reasoning.add_step(
+    await memory.reasoning.add_step(
         trace_id=trace.id,
         thought=content,
         action=step_type,
         generate_embedding=False,
     )
 
-    memory.reasoning.complete_trace(
+    await memory.reasoning.complete_trace(
         trace_id=trace.id,
         outcome=content[:500],
         success=True,
@@ -554,32 +731,32 @@ def _trace_reasoning_step(data: dict, session_id: str) -> TraceResponse:
     return TraceResponse(status="recorded", trace_id=str(trace.id))
 
 
-def _trace_skill_invocation(data: dict, session_id: str) -> TraceResponse:
+async def _trace_skill_invocation(data: dict, session_id: str) -> TraceResponse:
     skill_name = data.get("skill", "unknown")
     input_data = str(data.get("input", ""))
     output_data = str(data.get("output", ""))
 
-    trace = memory.reasoning.start_trace(
+    trace = await memory.reasoning.start_trace(
         session_id=session_id,
         task=f"Skill: {skill_name}",
         generate_embedding=False,
     )
 
-    step = memory.reasoning.add_step(
+    step = await memory.reasoning.add_step(
         trace_id=trace.id,
         thought=f"Invoking skill: {skill_name}",
         action=input_data,
         generate_embedding=False,
     )
 
-    memory.reasoning.record_tool_call(
+    await memory.reasoning.record_tool_call(
         step_id=step.id,
         tool_name=skill_name,
         arguments={"input": input_data},
         result=output_data,
     )
 
-    memory.reasoning.complete_trace(
+    await memory.reasoning.complete_trace(
         trace_id=trace.id,
         outcome=output_data[:500] if output_data else None,
         success=True,
@@ -596,7 +773,7 @@ def _trace_skill_invocation(data: dict, session_id: str) -> TraceResponse:
 async def memory_health():
     """Check Neo4j connectivity and return server status."""
     try:
-        stats = await asyncio.to_thread(memory.get_stats)
+        stats = await memory.get_stats()
         return {
             "status": "healthy",
             "neo4j": "connected",
@@ -616,7 +793,7 @@ async def memory_health():
 async def memory_stats():
     """Return memory counts and graph summary."""
     try:
-        stats = await asyncio.to_thread(memory.get_stats)
+        stats = await memory.get_stats()
         return {
             "agent_id": AGENT_ID,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -633,16 +810,17 @@ async def memory_stats():
 @app.post("/memory/context", response_model=ContextResponse)
 async def memory_context(req: ContextRequest):
     """Assemble relevance-ranked context from the graph."""
-
-    def _get_context():
-        context_str = memory.get_context(
+    try:
+        context_str = await memory.get_context(
             query=req.message,
             session_id=req.session_id,
             max_items=10,
         )
-        return context_str
-
-    context_str = await asyncio.to_thread(_get_context)
+    except Exception as exc:
+        logger.warning("Context falling back to direct graph search: %s", exc)
+        records = await _fallback_search_records(req.message, 10)
+        recall_results = [_record_to_recall_result(record) for record in records]
+        context_str = _build_context_from_results(recall_results)
 
     token_estimate = len(context_str) // 4
     if token_estimate > req.max_tokens:

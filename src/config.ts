@@ -5,12 +5,21 @@ export const DEFAULTS = {
   bridgePort: 7575,
   agentId: "default",
   instance: "openclaw-memory",
+  ephemeral: false,
 } as const;
+
+export interface Neo4jPortConfig {
+  bolt?: number;
+  http?: number;
+  https?: number;
+}
 
 export interface PluginConfig {
   bridgePort?: number;
   agentId?: string;
   instance?: string;
+  neo4jPorts?: Neo4jPortConfig;
+  ephemeral?: boolean;
   observational?: boolean;
 }
 
@@ -56,6 +65,8 @@ export function getResolvedConfig(api: OpenClawApi) {
     bridgePort: config.bridgePort ?? DEFAULTS.bridgePort,
     agentId: config.agentId ?? DEFAULTS.agentId,
     instance: config.instance ?? DEFAULTS.instance,
+    neo4jPorts: config.neo4jPorts,
+    ephemeral: config.ephemeral ?? DEFAULTS.ephemeral,
     observational: config.observational ?? false,
   };
 }
