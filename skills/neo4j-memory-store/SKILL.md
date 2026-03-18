@@ -43,12 +43,20 @@ Store conversation messages for short-term memory within a session.
 
 ## Workflow
 
+### Preferred native tools
+
+Use the built-in Neo4j-backed OpenClaw tools first:
+
+1. Run `memory_store` for normal writes
+2. Use `reasoning_trace` for provenance or audit events
+3. Fall back to the bridge HTTP examples below only when you explicitly need the raw API
+
 ### Storing an entity
 
 1. Identify the entity type (Person, Organization, Location, Event, or Object)
 2. Extract properties (name is required; add role, description, etc. as available)
 3. Identify relationships to other entities
-4. POST to the bridge server:
+4. Prefer `memory_store`; use the bridge endpoint below as a low-level fallback:
 
 ```bash
 curl -s -X POST http://localhost:7575/memory/store \
@@ -140,6 +148,7 @@ Use these relationship types to connect entities:
 ## Guidelines
 
 - Always use the person's full name when known
+- Prefer the native `memory_store` tool when available so the model stays inside the standard OpenClaw tool loop
 - Include the `session_id` to enable cross-session tracking
 - Include the `channel` to enable cross-channel memory
 - Store relationships at creation time — don't create orphan entities

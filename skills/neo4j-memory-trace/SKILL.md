@@ -21,6 +21,8 @@ metadata:
 
 ## What you can trace
 
+Prefer the native `reasoning_trace` tool when available. The bridge HTTP examples below remain useful for debugging the lower-level API directly.
+
 ### Tool Calls
 
 Record when you call external tools (web search, file read, API calls, etc.):
@@ -152,6 +154,7 @@ ORDER BY tc.timestamp
 ## Guidelines
 
 - Record tool calls AFTER the tool returns (so you have the output)
+- Prefer the native `reasoning_trace` tool over raw `curl` when possible
 - Include `entities_referenced` to link tool calls to the entity graph
 - Use `message_id` to link traces to specific conversation messages
 - Reasoning steps should reference their evidence (tool call IDs or entity names)

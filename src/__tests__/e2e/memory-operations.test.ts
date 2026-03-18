@@ -32,6 +32,14 @@ function makeApi() {
       info: (msg: string) => console.log(msg),
       warn: (msg: string) => console.warn(msg),
     },
+    registerTool: (() => {}) as unknown as (
+      _tool: unknown,
+      _opts?: unknown
+    ) => void,
+    on: (() => {}) as unknown as (
+      _hookName: string,
+      _handler: unknown
+    ) => void,
     registerService: null as unknown as (service: {
       id: string;
       start: () => Promise<void>;
@@ -356,6 +364,15 @@ describe("Memory operations (e2e)", () => {
     expect(body.results).toEqual([]);
   });
 
+  it("recalls natural-language questions by extracting candidate entities", async () => {
+    const res = await httpPost(`${BASE}/memory/recall`, {
+      query: "What do you know about Alice?",
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(JSON.stringify(body)).toContain("Alice");
+  });
+
   // -------------------------------------------------------------------
   // Query
   // -------------------------------------------------------------------
@@ -519,6 +536,52 @@ describe("Memory operations (e2e)", () => {
     expect(body).toHaveProperty("token_estimate");
     expect(typeof body.context).toBe("string");
     expect(typeof body.token_estimate).toBe("number");
+  });
+
+  it("returns a memory document via /memory/get", async () => {
+    const recall = await httpPost(`${BASE}/memory/recall`, {
+      query: "Alice",
+      limit: 1,
+    });
+    const recallBody = JSON.parse(recall.body);
+    expect(recallBody.count).toBeGreaterThan(0);
+
+    const entityId = recallBody.results[0]?.id;
+    expect(entityId).toBeDefined();
+
+    const res = await httpPost(`${BASE}/memory/get`, {
+      id: entityId,
+      from_line: 1,
+      lines: 12,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.path).toContain("neo4j/entity/");
+    expect(body.text).toContain("Alice");
+    expect(body.total_lines).toBeGreaterThan(0);
+  });
+
+  it("returns a memory document via /memory/get path lookup", async () => {
+    const recall = await httpPost(`${BASE}/memory/recall`, {
+      query: "Alice",
+      limit: 1,
+    });
+    const recallBody = JSON.parse(recall.body);
+    expect(recallBody.count).toBeGreaterThan(0);
+
+    const entityPath = `neo4j/entity/${recallBody.results[0]?.id}-alice`;
+    expect(entityPath).toContain("neo4j/entity/");
+
+    const res = await httpPost(`${BASE}/memory/get`, {
+      path: entityPath,
+      from_line: 1,
+      lines: 12,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.path).toContain("neo4j/entity/");
+    expect(body.text).toContain("Alice");
+    expect(body.total_lines).toBeGreaterThan(0);
   });
 
   it("respects max_tokens for context", async () => {

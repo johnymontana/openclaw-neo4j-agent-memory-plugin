@@ -23,9 +23,50 @@
         "type": "string",
         "default": "openclaw-memory"
       },
+      "neo4jPorts": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "bolt": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "http": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "https": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          }
+        }
+      },
+      "ephemeral": {
+        "type": "boolean",
+        "default": false
+      },
       "observational": {
         "type": "boolean",
         "default": false
+      },
+      "autoRecall": {
+        "type": "boolean",
+        "default": true
+      },
+      "autoCapture": {
+        "type": "boolean",
+        "default": false
+      },
+      "graphTools": {
+        "type": "boolean",
+        "default": true
+      },
+      "readOnlyCypher": {
+        "type": "boolean",
+        "default": true
       }
     }
   },
@@ -39,8 +80,30 @@
     "instance": {
       "label": "Neo4j Instance"
     },
+    "neo4jPorts": {
+      "label": "Neo4j Ports"
+    },
+    "ephemeral": {
+      "label": "Ephemeral Neo4j Instance"
+    },
     "observational": {
       "label": "Enable Observational Memory"
+    },
+    "autoRecall": {
+      "label": "Auto-Recall",
+      "help": "Inject relevant graph memory into prompts before the agent responds."
+    },
+    "autoCapture": {
+      "label": "Auto-Capture",
+      "help": "Persist user messages into Neo4j memory after successful agent runs."
+    },
+    "graphTools": {
+      "label": "Enable Graph Tools",
+      "help": "Expose entity lookup and graph query tools to the agent."
+    },
+    "readOnlyCypher": {
+      "label": "Read-Only Cypher",
+      "help": "Restrict graph queries to read-only Cypher."
     }
   }
 }

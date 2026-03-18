@@ -7,6 +7,8 @@ using the neo4j-agent-memory package. Provides three-tier memory: short-term
 """
 
 import os
+import re
+import json
 import uuid
 import time
 import asyncio
@@ -39,6 +41,7 @@ BRIDGE_PORT = int(os.environ.get("BRIDGE_PORT", "7575"))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("neo4j-memory-bridge")
+ENTITY_PATH_PREFIX = "neo4j/entity/"
 
 # ---------------------------------------------------------------------------
 # MemoryClient lifecycle
@@ -68,6 +71,25 @@ def _sanitize_properties(properties: dict) -> dict:
     return sanitized
 
 
+def _extract_metadata_attributes(metadata_value) -> dict:
+    if metadata_value is None:
+        return {}
+
+    parsed = metadata_value
+    if isinstance(metadata_value, str):
+        try:
+            parsed = json.loads(metadata_value)
+        except Exception:
+            return {}
+
+    if isinstance(parsed, dict):
+        attributes = parsed.get("attributes")
+        if isinstance(attributes, dict):
+            return _sanitize_properties(attributes)
+
+    return {}
+
+
 def _make_json_safe(value):
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -83,6 +105,75 @@ def _make_json_safe(value):
         except Exception:
             pass
     return str(value)
+
+
+READ_ONLY_CYPHER_PATTERN = re.compile(
+    r"\b(create|merge|delete|detach|set|remove|drop|load\s+csv|start\s+database|stop\s+database)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_read_only_cypher(cypher: str) -> bool:
+    normalized = " ".join((cypher or "").split())
+    if not normalized:
+        return False
+    if READ_ONLY_CYPHER_PATTERN.search(normalized):
+        return False
+    if re.search(r"\bcall\s+dbms\b", normalized, re.IGNORECASE):
+        return False
+    if re.search(r"\bcall\s+apoc\.(periodic|refactor)\b", normalized, re.IGNORECASE):
+        return False
+    return True
+
+
+def _normalize_candidate(value: str) -> str:
+    candidate = re.sub(r"\s+", " ", value.strip())
+    candidate = re.sub(r"^[^\w]+|[^\w]+$", "", candidate)
+    candidate = re.sub(r"'s\b", "", candidate, flags=re.IGNORECASE)
+    return candidate.strip()
+
+
+def _extract_query_candidates(text: str) -> list[str]:
+    if not text:
+        return []
+
+    candidates = []
+    normalized = _normalize_candidate(text)
+    if normalized:
+        candidates.append(normalized)
+
+    patterns = [
+        r"(?i)(?:tell me about|what do you know about|what is|who is|who owns|show me everything connected to|without using prior conversation context[, ]*)(.+)",
+        r"(?i)(?:about|for|regarding)\s+(.+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            extracted = _normalize_candidate(match.group(1))
+            if extracted:
+                candidates.append(extracted)
+
+    for quoted in re.findall(r'"([^"]+)"|\'([^\']+)\'', text):
+        for value in quoted:
+            candidate = _normalize_candidate(value)
+            if candidate:
+                candidates.append(candidate)
+
+    for proper_noun_span in re.findall(r"(?:[A-Z][\w-]*)(?:\s+[A-Z][\w-]*)+", text):
+        candidate = _normalize_candidate(proper_noun_span)
+        if candidate:
+            candidates.append(candidate)
+
+    deduped = []
+    seen = set()
+    for candidate in candidates:
+        lowered = candidate.lower()
+        if lowered in seen or len(candidate) < 2:
+            continue
+        seen.add(lowered)
+        deduped.append(candidate)
+
+    return deduped[:5]
 
 
 async def _fallback_search_records(query: str, limit: int) -> list[dict]:
@@ -172,6 +263,9 @@ async def _fallback_query_records(
 
 def _record_to_recall_result(record: dict) -> dict:
     props = _sanitize_properties(record.get("props", {}))
+    metadata_attributes = _extract_metadata_attributes(props.get("metadata"))
+    if metadata_attributes:
+        props.update({k: v for k, v in metadata_attributes.items() if k not in props})
     labels = [_make_json_safe(label) for label in record.get("labels", [])]
 
     entity_type = props.get("entity_type")
@@ -189,11 +283,19 @@ def _record_to_recall_result(record: dict) -> dict:
         or "unknown"
     )
     description = props.get("description") or props.get("content") or ""
+    attributes = {
+        key: value
+        for key, value in props.items()
+        if key not in {"name", "title", "subject", "description", "content", "entity_type", "metadata"}
+    }
 
     result = {
+        "id": props.get("id") or record.get("element_id"),
+        "graph_id": record.get("element_id"),
         "name": name,
         "entity_type": entity_type,
         "description": description,
+        "attributes": attributes,
         "_labels": labels,
         "_relationships": _make_json_safe(record.get("relationships", [])),
     }
@@ -203,6 +305,125 @@ def _record_to_recall_result(record: dict) -> dict:
             result[key] = value
 
     return result
+
+
+def _entity_to_result(entity, related: list | None = None) -> dict:
+    attributes = _sanitize_properties(entity.attributes or {})
+    metadata_attributes = _extract_metadata_attributes(getattr(entity, "metadata", None))
+    if metadata_attributes:
+        attributes.update({k: v for k, v in metadata_attributes.items() if k not in attributes})
+    result = {
+        "id": str(entity.id),
+        "graph_id": str(entity.id),
+        "name": entity.name,
+        "entity_type": entity.entity_type,
+        "description": entity.description,
+        "attributes": attributes,
+        "_labels": ["Entity", entity.entity_type.title()],
+        "_relationships": [],
+    }
+
+    if attributes:
+        result.update(attributes)
+
+    if related:
+        result["_relationships"] = [
+            {
+                "type": relationship.relationship_type,
+                "target_labels": [related_entity.entity_type],
+                "target_name": related_entity.name,
+            }
+            for related_entity, relationship in related
+        ]
+
+    return _make_json_safe(result)
+
+
+def _build_memory_document(result: dict, path: str) -> str:
+    lines = [f"{result.get('name', 'unknown')} ({result.get('entity_type', 'Object')})"]
+
+    description = result.get("description")
+    if description:
+        lines.append(str(description))
+
+    attributes = result.get("attributes")
+    if isinstance(attributes, dict) and attributes:
+        rendered_attributes = [
+            f"{key}: {value}"
+            for key, value in attributes.items()
+            if value not in (None, "", [], {})
+        ]
+        if rendered_attributes:
+            lines.append("Attributes: " + "; ".join(rendered_attributes[:8]))
+
+    relationships = result.get("_relationships") or []
+    if isinstance(relationships, list) and relationships:
+        lines.append("Relationships:")
+        for relationship in relationships[:8]:
+            rel_type = relationship.get("type")
+            target_name = (
+                relationship.get("target_name")
+                or relationship.get("target")
+                or relationship.get("targetName")
+            )
+            if rel_type and target_name:
+                lines.append(f"- {rel_type} -> {target_name}")
+
+    lines.append(f"Source: {path}")
+    return "\n".join(lines)
+
+
+def _slice_document_lines(text: str, from_line: int, max_lines: int) -> tuple[str, int]:
+    lines = text.splitlines()
+    total_lines = len(lines) if lines else 1
+    start_index = max(from_line - 1, 0)
+    end_index = min(start_index + max_lines, len(lines))
+    sliced = "\n".join(lines[start_index:end_index]) if lines else text
+    return sliced, total_lines
+
+
+def _extract_id_from_path(path: str) -> Optional[str]:
+    if not path.startswith(ENTITY_PATH_PREFIX):
+        return None
+    suffix = path[len(ENTITY_PATH_PREFIX):]
+    uuid_match = re.match(
+        r"^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
+        suffix,
+    )
+    if uuid_match:
+        return uuid_match.group(1)
+    return suffix.split("-", 1)[0] or None
+
+
+async def _lookup_entity_record_by_id(identifier: str) -> Optional[dict]:
+    records = await memory.graph.execute_read(
+        """
+        MATCH (n)
+        WHERE coalesce(toString(n.id), "") = $identifier OR elementId(n) = $identifier
+        OPTIONAL MATCH (n)-[r]-(m)
+        WITH n,
+             labels(n) AS labels,
+             properties(n) AS props,
+             elementId(n) AS element_id,
+             collect(DISTINCT CASE
+               WHEN r IS NULL OR m IS NULL THEN NULL
+               ELSE {
+                 type: type(r),
+                 target_labels: labels(m),
+                 target_name: coalesce(m.name, m.title, m.subject, m.content, elementId(m))
+               }
+             END)[..8] AS raw_relationships
+        RETURN labels,
+               props,
+               element_id,
+               [rel IN raw_relationships WHERE rel IS NOT NULL] AS relationships
+        LIMIT 1
+        """,
+        {"identifier": identifier},
+    )
+    if not records:
+        return None
+    return _record_to_recall_result(records[0])
 
 
 def _build_context_from_results(results: list[dict]) -> str:
@@ -325,6 +546,8 @@ class MessageData(BaseModel):
     role: str
     content: str
     timestamp: Optional[str] = None
+    extract_entities: bool = False
+    extract_relations: bool = False
 
 
 class StoreRequest(BaseModel):
@@ -395,6 +618,27 @@ class ContextResponse(BaseModel):
     entities_used: int
     reasoning_traces: int
     token_estimate: int
+
+
+class GetRequest(BaseModel):
+    path: Optional[str] = None
+    id: Optional[str] = None
+    name: Optional[str] = None
+    query: Optional[str] = None
+    entity_type: Optional[str] = None
+    from_line: int = 1
+    lines: int = 20
+    session_id: Optional[str] = None
+    agent_id: Optional[str] = None
+
+
+class GetResponse(BaseModel):
+    path: str
+    text: str
+    from_line: int
+    lines: int
+    total_lines: int
+    entity: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +731,8 @@ async def _store_message(data: dict, session_id: str) -> StoreResponse:
         session_id=session_id,
         role=msg.role,
         content=msg.content,
-        extract_entities=False,
+        extract_entities=msg.extract_entities,
+        extract_relations=msg.extract_relations,
         generate_embedding=False,
     )
     return StoreResponse(status="stored", node_id=str(result.id), merged=False)
@@ -528,38 +773,28 @@ async def memory_recall(req: RecallRequest):
     """Retrieve context relevant to a query."""
 
     results = []
+    candidates = _extract_query_candidates(req.query) or [req.query]
 
     try:
-        entities = await memory.long_term.search_entities(
-            query=req.query,
-            limit=req.limit,
-            threshold=0.0,
-        )
-
-        for entity in entities:
-            entity_dict = {
-                "name": entity.name,
-                "entity_type": entity.entity_type,
-                "description": entity.description,
-                "_labels": [entity.entity_type],
-            }
-            if entity.attributes:
-                entity_dict.update(entity.attributes)
-
-            try:
-                related = await memory.long_term.get_related_entities(entity)
-                entity_dict["_relationships"] = [
-                    {
-                        "type": relationship.relationship_type,
-                        "target_labels": [related_entity.entity_type],
-                        "target_name": related_entity.name,
-                    }
-                    for related_entity, relationship in related
-                ]
-            except Exception:
-                entity_dict["_relationships"] = []
-
-            results.append(entity_dict)
+        seen_ids = set()
+        for candidate in candidates:
+            entities = await memory.long_term.search_entities(
+                query=candidate,
+                limit=req.limit,
+                threshold=0.0,
+            )
+            for entity in entities:
+                entity_id = str(entity.id)
+                if entity_id in seen_ids:
+                    continue
+                seen_ids.add(entity_id)
+                try:
+                    related = await memory.long_term.get_related_entities(entity)
+                except Exception:
+                    related = []
+                results.append(_entity_to_result(entity, related))
+            if results:
+                break
 
         if req.include_reasoning:
             try:
@@ -578,8 +813,11 @@ async def memory_recall(req: RecallRequest):
                 pass
     except Exception as exc:
         logger.warning("Recall falling back to direct graph search: %s", exc)
-        records = await _fallback_search_records(req.query, req.limit)
-        results = [_record_to_recall_result(record) for record in records]
+        for candidate in candidates:
+            records = await _fallback_search_records(candidate, req.limit)
+            if records:
+                results = [_record_to_recall_result(record) for record in records]
+                break
 
     return RecallResponse(results=results, count=len(results), query=req.query)
 
@@ -593,8 +831,11 @@ async def memory_query(req: QueryRequest):
     """Execute structured entity queries or free-form Cypher."""
 
     if req.cypher:
+        if not _is_read_only_cypher(req.cypher):
+            raise HTTPException(status_code=400, detail="Only read-only Cypher queries are allowed")
         records = await memory.graph.execute_read(req.cypher, req.params)
-        return QueryResponse(results=records, count=len(records))
+        safe_records = [_make_json_safe(record) for record in records]
+        return QueryResponse(results=safe_records, count=len(safe_records))
 
     records = []
     try:
@@ -615,25 +856,18 @@ async def memory_query(req: QueryRequest):
             )
 
         for entity in entities:
-            node_data = {
-                "name": entity.name,
-                "entity_type": entity.entity_type,
-                "description": entity.description,
-                "_labels": [entity.entity_type],
-            }
-            if entity.attributes:
-                node_data.update(_sanitize_properties(entity.attributes))
-
             try:
                 related = await memory.long_term.get_related_entities(entity)
-                node_data["_relationships"] = [
-                    {"type": r.relationship_type, "target": re.name}
-                    for re, r in related
-                    if r.relationship_type is not None
-                ]
             except Exception:
-                node_data["_relationships"] = []
+                related = []
 
+            node_data = _entity_to_result(entity, related)
+            if isinstance(node_data.get("_relationships"), list):
+                node_data["_relationships"] = [
+                    {"type": relationship.get("type"), "target": relationship.get("target_name")}
+                    for relationship in node_data["_relationships"]
+                    if relationship.get("type")
+                ]
             records.append(node_data)
     except Exception as exc:
         logger.warning("Query falling back to direct graph search: %s", exc)
@@ -810,17 +1044,29 @@ async def memory_stats():
 @app.post("/memory/context", response_model=ContextResponse)
 async def memory_context(req: ContextRequest):
     """Assemble relevance-ranked context from the graph."""
+    candidates = _extract_query_candidates(req.message) or [req.message]
+    context_str = ""
+
     try:
-        context_str = await memory.get_context(
-            query=req.message,
-            session_id=req.session_id,
-            max_items=10,
-        )
+        for candidate in candidates:
+            context_str = await memory.get_context(
+                query=candidate,
+                session_id=req.session_id,
+                max_items=10,
+            )
+            if context_str.strip():
+                break
     except Exception as exc:
         logger.warning("Context falling back to direct graph search: %s", exc)
-        records = await _fallback_search_records(req.message, 10)
-        recall_results = [_record_to_recall_result(record) for record in records]
-        context_str = _build_context_from_results(recall_results)
+        context_str = ""
+
+    if not context_str.strip():
+        for candidate in candidates:
+            records = await _fallback_search_records(candidate, 10)
+            if records:
+                recall_results = [_record_to_recall_result(record) for record in records]
+                context_str = _build_context_from_results(recall_results)
+                break
 
     token_estimate = len(context_str) // 4
     if token_estimate > req.max_tokens:
@@ -837,6 +1083,48 @@ async def memory_context(req: ContextRequest):
         entities_used=entities_used,
         reasoning_traces=reasoning_traces,
         token_estimate=token_estimate,
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /memory/get
+# ---------------------------------------------------------------------------
+
+
+@app.post("/memory/get", response_model=GetResponse)
+async def memory_get(req: GetRequest):
+    """Return a fuller entity-centric memory document for a recall hit."""
+
+    identifier = req.id or (_extract_id_from_path(req.path) if req.path else None)
+    result = None
+
+    if identifier:
+        result = await _lookup_entity_record_by_id(identifier)
+
+    if not result and req.name:
+        query_records = await _fallback_query_records(req.entity_type, req.name, 1)
+        if query_records:
+            result = _record_to_recall_result(query_records[0])
+
+    if not result and req.query:
+        recall_records = await _fallback_search_records(req.query, 1)
+        if recall_records:
+            result = _record_to_recall_result(recall_records[0])
+
+    if not result:
+        raise HTTPException(status_code=404, detail="No matching Neo4j memory record found")
+
+    path = req.path or f"{ENTITY_PATH_PREFIX}{result.get('id', result.get('graph_id', 'unknown'))}"
+    full_text = _build_memory_document(result, path)
+    sliced_text, total_lines = _slice_document_lines(full_text, req.from_line, req.lines)
+
+    return GetResponse(
+        path=path,
+        text=sliced_text,
+        from_line=req.from_line,
+        lines=min(req.lines, total_lines),
+        total_lines=total_lines,
+        entity=_make_json_safe(result),
     )
 
 

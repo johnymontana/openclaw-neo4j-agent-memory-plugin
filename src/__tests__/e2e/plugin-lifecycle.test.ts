@@ -41,6 +41,14 @@ function makeApi() {
           console.warn(msg);
         },
       },
+      registerTool: (() => {}) as unknown as (
+        _tool: unknown,
+        _opts?: unknown
+      ) => void,
+      on: (() => {}) as unknown as (
+        _hookName: string,
+        _handler: unknown
+      ) => void,
       registerService: null as unknown as (service: {
         id: string;
         start: () => Promise<void>;

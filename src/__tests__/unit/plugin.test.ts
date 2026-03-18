@@ -99,6 +99,8 @@ function makeApi(configOverrides?: Record<string, unknown>) {
       },
     },
     logger: { info: vi.fn(), warn: vi.fn() },
+    registerTool: vi.fn(),
+    on: vi.fn(),
     registerService: vi.fn(),
   };
 }
@@ -132,6 +134,19 @@ describe("plugin", () => {
         start: expect.any(Function),
         stop: expect.any(Function),
       })
+    );
+  });
+
+  it("register() wires native tools and hooks", async () => {
+    const plugin = (await import("../../index")).default ?? await import("../../index");
+    const api = makeApi();
+
+    plugin.register(api);
+
+    expect(api.registerTool).toHaveBeenCalledOnce();
+    expect(api.on).toHaveBeenCalledWith(
+      "before_prompt_build",
+      expect.any(Function)
     );
   });
 
