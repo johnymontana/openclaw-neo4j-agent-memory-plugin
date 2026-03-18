@@ -13,6 +13,8 @@ function makeApi(
     config: { plugins: { entries: entries ?? {} } },
     logger: { info: () => {}, warn: () => {} },
     registerService: () => {},
+    registerTool: () => {},
+    on: () => {},
   };
 }
 
@@ -69,6 +71,8 @@ describe("readPluginConfig", () => {
     const api: OpenClawApi = {
       logger: { info: () => {}, warn: () => {} },
       registerService: () => {},
+      registerTool: () => {},
+      on: () => {},
     };
     expect(readPluginConfig(api)).toEqual({});
   });
@@ -85,6 +89,10 @@ describe("getResolvedConfig", () => {
       neo4jPorts: undefined,
       ephemeral: false,
       observational: false,
+      autoRecall: true,
+      autoCapture: false,
+      graphTools: true,
+      readOnlyCypher: true,
     });
   });
 
@@ -102,6 +110,10 @@ describe("getResolvedConfig", () => {
       neo4jPorts: undefined,
       ephemeral: false,
       observational: false,
+      autoRecall: true,
+      autoCapture: false,
+      graphTools: true,
+      readOnlyCypher: true,
     });
   });
 
@@ -115,6 +127,10 @@ describe("getResolvedConfig", () => {
           neo4jPorts: { bolt: 18687, http: 18474, https: 18473 },
           ephemeral: true,
           observational: true,
+          autoRecall: false,
+          autoCapture: true,
+          graphTools: false,
+          readOnlyCypher: false,
         },
       },
     });
@@ -126,6 +142,10 @@ describe("getResolvedConfig", () => {
       neo4jPorts: { bolt: 18687, http: 18474, https: 18473 },
       ephemeral: true,
       observational: true,
+      autoRecall: false,
+      autoCapture: true,
+      graphTools: false,
+      readOnlyCypher: false,
     });
   });
 });

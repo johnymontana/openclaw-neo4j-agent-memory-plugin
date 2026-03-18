@@ -3,6 +3,7 @@ import { request as httpRequest } from "node:http";
 import { Neo4jLocal, type Neo4jCredentials } from "@johnymontana/neo4j-local";
 import { PLUGIN_ID, SERVICE_ID, getResolvedConfig, type OpenClawApi } from "./config";
 import { BridgeServer } from "./bridge";
+import { registerNeo4jHooks, registerNeo4jTools } from "./adapter";
 
 let neo4jInstance: Neo4jLocal | null = null;
 let bridgeServer: BridgeServer | null = null;
@@ -195,6 +196,9 @@ const plugin = {
   name: "Neo4j Memory",
 
   register(api: OpenClawApi) {
+    registerNeo4jTools(api);
+    registerNeo4jHooks(api);
+
     api.registerService({
       id: SERVICE_ID,
 

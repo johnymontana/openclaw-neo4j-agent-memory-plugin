@@ -24,10 +24,19 @@ metadata:
 
 ## Workflow
 
+### Preferred native tools
+
+Use the built-in Neo4j-backed OpenClaw tools first:
+
+1. Run `memory_search` with the user question or the key entity/topic
+2. If a hit looks relevant, run `memory_get` on the returned pseudo-path for more detail
+3. Use `entity_lookup` when the user is asking directly about one graph entity
+4. Use `graph_query` only for relationship-heavy questions that need custom traversal
+
 ### Basic recall
 
 1. Extract the key entity or topic from the user message
-2. POST to the bridge server
+2. Prefer `memory_search`; use the bridge endpoint below only as a fallback or for low-level debugging
 3. Inject the returned context into your response
 4. If nothing is found, proceed normally and note you have no prior context
 
@@ -111,6 +120,7 @@ This returns a Markdown-formatted context block with:
 ## Guidelines
 
 - Recall BEFORE answering questions about people, projects, or past events
+- Prefer `memory_search` + `memory_get` over raw `curl` when the native tools are available
 - Use `/memory/context` for system prompt injection (most token-efficient)
 - Use `/memory/recall` when you need raw structured data for processing
 - If recall returns nothing, say so — don't hallucinate prior context

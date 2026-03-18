@@ -4,6 +4,7 @@ const node_http_1 = require("node:http");
 const neo4j_local_1 = require("@johnymontana/neo4j-local");
 const config_1 = require("./config");
 const bridge_1 = require("./bridge");
+const adapter_1 = require("./adapter");
 let neo4jInstance = null;
 let bridgeServer = null;
 const DEFAULT_PROBE_ATTEMPTS = 3;
@@ -123,6 +124,8 @@ const plugin = {
     id: config_1.PLUGIN_ID,
     name: "Neo4j Memory",
     register(api) {
+        (0, adapter_1.registerNeo4jTools)(api);
+        (0, adapter_1.registerNeo4jHooks)(api);
         api.registerService({
             id: config_1.SERVICE_ID,
             start: async () => {

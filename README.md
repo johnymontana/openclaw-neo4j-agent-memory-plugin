@@ -41,9 +41,42 @@ This will automatically:
 
 OpenClaw may warn that the plugin contains shell-command execution. That is expected for this plugin: the runtime entry starts and stops the existing `server/start.sh` and `server/stop.sh` lifecycle scripts.
 
-### 2. Use the Skills
+### 2. Use the Native Tools
 
-The plugin ships four skills your agent learns automatically:
+Once installed, the plugin participates directly in the OpenClaw agent loop through native tools and hooks:
+
+- `memory_search` for ranked Neo4j-backed recall
+- `memory_get` for fuller entity-centric reads
+- `memory_store` for durable graph writes
+- `entity_lookup` and `graph_query` for graph-native exploration
+- `reasoning_trace` for provenance and audit history
+
+If `autoRecall` is enabled, the plugin also injects relevant memory automatically before prompt build. If `autoCapture` is enabled, recent user messages are stored after successful runs.
+
+Important OpenClaw runtime note:
+
+- Under the standard `tools.profile: "coding"` policy, OpenClaw's built-in `group:memory` currently exposes `memory_search` and `memory_get`.
+- The graph-native tools (`memory_store`, `entity_lookup`, `graph_query`, `reasoning_trace`) work, but they must be added via `tools.alsoAllow` if you want them available to the model in normal agent runs.
+
+Example:
+
+```json
+{
+  "tools": {
+    "profile": "coding",
+    "alsoAllow": [
+      "memory_store",
+      "entity_lookup",
+      "graph_query",
+      "reasoning_trace"
+    ]
+  }
+}
+```
+
+### 3. Use the Skills
+
+The plugin still ships four skills as a fallback and for direct bridge workflows:
 
 | Skill | Emoji | Purpose |
 |---|---|---|
@@ -52,7 +85,7 @@ The plugin ships four skills your agent learns automatically:
 | `neo4j-memory-query` | :mag: | Run structured or Cypher queries against the knowledge graph |
 | `neo4j-memory-trace` | :link: | Record and query reasoning traces |
 
-### 3. Convert an Existing Agent Package
+### 4. Convert an Existing Agent Package
 
 If your agent package still uses `MEMORY.md` or `memory/YYYY-MM-DD.md`, update it right after installing the plugin:
 
@@ -80,13 +113,15 @@ If you installed an older build of this plugin, upgrade to the latest package be
 ┌─────────────────────────────────────────────┐
 │                OpenClaw Agent                │
 │                                             │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐    │
-│  │  store   │ │  recall  │ │  query   │    │
-│  │  skill   │ │  skill   │ │  skill   │    │
-│  └────┬─────┘ └────┬─────┘ └────┬─────┘    │
-│       │             │            │           │
-│       └─────────────┼────────────┘           │
-│                     │  curl                  │
+│  ┌──────────────┐ ┌──────────────────────┐  │
+│  │ Native Tools │ │ Auto Hooks           │  │
+│  │memory_search │ │before_prompt_build   │  │
+│  │memory_get    │ │agent_end             │  │
+│  │memory_store  │ │after_tool_call*      │  │
+│  └──────┬───────┘ └──────────┬───────────┘  │
+│         │                     │              │
+│         └─────────────┬───────┘              │
+│                       │ bridge client        │
 └─────────────────────┼───────────────────────┘
                       │
               ┌───────▼───────┐
@@ -183,7 +218,7 @@ curl -X POST http://localhost:7575/memory/recall \
 
 ### POST /memory/query
 
-Run structured or free-form Cypher queries.
+Run structured or read-only Cypher queries.
 
 ```bash
 curl -X POST http://localhost:7575/memory/query \
@@ -222,6 +257,16 @@ curl -X POST http://localhost:7575/memory/context \
   -d '{"message": "What do we know about Sarah?", "max_tokens": 2000}'
 ```
 
+### POST /memory/get
+
+Read a fuller entity-centric memory document for a recall hit:
+
+```bash
+curl -X POST http://localhost:7575/memory/get \
+  -H "Content-Type: application/json" \
+  -d '{"id": "entity-123", "from_line": 1, "lines": 20}'
+```
+
 ### GET /memory/health
 
 Check Neo4j connectivity.
@@ -258,6 +303,11 @@ The plugin works out of the box with zero configuration. To override defaults, c
           "bridgePort": 7575,
           "agentId": "default",
           "instance": "openclaw-memory",
+          "ephemeral": false,
+          "autoRecall": true,
+          "autoCapture": false,
+          "graphTools": true,
+          "readOnlyCypher": true,
           "observational": false
         }
       }
@@ -271,7 +321,28 @@ The plugin works out of the box with zero configuration. To override defaults, c
 | `bridgePort` | `7575` | Bridge server port |
 | `agentId` | `default` | Agent identity for memory namespace scoping |
 | `instance` | `openclaw-memory` | Neo4j local instance name |
-| `observational` | `false` | Enable observational memory (Phase 2) |
+| `ephemeral` | `false` | Use an ephemeral managed Neo4j instance |
+| `autoRecall` | `true` | Inject relevant graph memory before prompt build |
+| `autoCapture` | `false` | Store recent user messages after successful runs |
+| `graphTools` | `true` | Expose `entity_lookup` and `graph_query` |
+| `readOnlyCypher` | `true` | Restrict graph queries to read-only Cypher |
+| `observational` | `false` | Record tool-call traces after execution |
+
+If you want the advanced graph-native tools to be callable by the model under the normal OpenClaw `coding` profile, add them with `tools.alsoAllow`:
+
+```json
+{
+  "tools": {
+    "profile": "coding",
+    "alsoAllow": [
+      "memory_store",
+      "entity_lookup",
+      "graph_query",
+      "reasoning_trace"
+    ]
+  }
+}
+```
 
 ## Stopping
 

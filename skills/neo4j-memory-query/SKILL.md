@@ -24,6 +24,14 @@ metadata:
 
 ## Workflow
 
+### Preferred native tools
+
+Use the built-in Neo4j-backed OpenClaw tools first:
+
+1. Run `memory_search` or `entity_lookup` for straightforward lookups
+2. Use `graph_query` for custom traversal or aggregation
+3. Fall back to the bridge HTTP examples below only when you need the raw API surface
+
 ### Template-based entity query
 
 Search by entity type and/or name:
@@ -150,7 +158,9 @@ Returns:
 
 - Use template queries for simple entity lookups
 - Use free-form Cypher for relationship traversals and aggregations
+- Prefer `graph_query` over raw `curl` when the native tool is available
 - Always use parameterized queries (`$param`) — never interpolate user input into Cypher strings
+- Keep Cypher read-only; write operations should go through `memory_store`
 - The `$agent_id` parameter is automatically injected into template queries
 - For Cypher queries, use `$agent_id` to filter by agent namespace
 - Keep `limit` reasonable to avoid overwhelming context windows
