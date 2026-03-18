@@ -1,6 +1,6 @@
 # OpenClaw Neo4j Agent Memory Plugin
 
-Graph-native long-term memory for OpenClaw agents, powered by Neo4j.
+Graph native short-term, long-term, and reasoning memory to make your claw more powerful and efficient powered by [Neo4j Agent Memory](https://github.com/neo4j-labs/agent-memory).
 
 Replaces OpenClaw's flat Markdown-based memory with a three-tier graph memory system:
 
